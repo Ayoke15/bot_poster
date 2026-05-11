@@ -140,14 +140,15 @@ Railway даст тебе:
 - **New Project → Deploy from GitHub Repo**
 - Затем **Add → Database → PostgreSQL**
 
-3) В переменных Railway (Variables) добавь:
+3) В переменных Railway (**Variables у того же сервиса**, что и веб‑приложение) добавь обязательно:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
-- `VK_CLIENT_ID`
-- `VK_CLIENT_SECRET`
+- **`VK_CLIENT_ID`** и **`VK_CLIENT_SECRET`** (из кабинета VK ID / приложения; без них контейнер раньше падал при старте — сейчас сервис поднимется, но `/connect_vk` не заработает, пока не добавишь)
 - `VK_API_VERSION` (опционально, по умолчанию `5.199`)
 
-`DATABASE_URL` Railway обычно добавит сам после подключения Postgres.
+`DATABASE_URL` Railway обычно добавит сам после подключения Postgres (или подключи переменную из сервиса Postgres к сервису приложения).
+
+Проверка после деплоя: открой `https://<твой-домен>/health` — в ответе должно быть `"vk_oauth_configured": true`, когда VK‑переменные заданы.
 
 4) После первого деплоя Railway покажет публичный домен вида `https://xxxxx.up.railway.app`.
 Поставь:

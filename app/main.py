@@ -118,6 +118,19 @@ async def telegram_webhook(secret: str, request: Request):
                 )
             elif text.startswith("/connect_vk"):
                 if from_user and isinstance(from_user.get("id"), int):
+                    if not settings.vk_oauth_configured:
+                        await tg_send_message(
+                            bot_token=settings.telegram_bot_token,
+                            chat_id=chat_id,
+                            text=(
+                                "VK OAuth не настроен на сервере.\n\n"
+                                "В Railway → твой сервис → Variables добавь:\n"
+                                "- VK_CLIENT_ID\n"
+                                "- VK_CLIENT_SECRET\n\n"
+                                "Потом Redeploy. Без них приложение не сможет открыть авторизацию VK."
+                            ),
+                        )
+                        return {"ok": True}
                     tg_user_id = int(from_user["id"])
                     state = secrets.token_urlsafe(24)
                     verifier, challenge = generate_pkce_pair()
@@ -307,6 +320,11 @@ async def telegram_webhook(secret: str, request: Request):
 
 @app.get("/vk/callback")
 async def vk_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    if not settings.vk_oauth_configured:
+        return HTMLResponse(
+            "VK OAuth is not configured (missing VK_CLIENT_ID / VK_CLIENT_SECRET on server).",
+            status_code=503,
+        )
     if error:
         return HTMLResponse(f"VK auth error: {error}", status_code=400)
     if not code or not state:
@@ -390,4 +408,4 @@ async def vk_callback(code: str | None = None, state: str | None = None, error: 
 
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    return {"ok": True, "vk_oauth_configured": settings.vk_oauth_configured}

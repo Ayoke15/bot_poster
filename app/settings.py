@@ -11,11 +11,15 @@ class Settings(BaseSettings):
 
     vk_api_version: str = "5.199"
 
-    # VK ID / OAuth (web)
-    # You must configure these in VK developer cabinet / VK ID.
-    vk_client_id: str
-    vk_client_secret: str
+    # VK ID / OAuth (web). Пустые значения допускаются, чтобы сервис поднимался на Railway
+    # до того, как ты добавишь переменные в Variables.
+    vk_client_id: str = ""
+    vk_client_secret: str = ""
     vk_redirect_path: str = "/vk/callback"
+
+    @property
+    def vk_oauth_configured(self) -> bool:
+        return bool(self.vk_client_id.strip() and self.vk_client_secret.strip())
 
 
 settings = Settings()
