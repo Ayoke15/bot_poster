@@ -1,26 +1,21 @@
 from __future__ import annotations
 
 import os
-from typing import Iterable
-import secrets
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 
 from app.db import ensure_user, init_db
 from app.settings import settings
 from app.telegram import (
-    extract_callback_query,
     extract_channel_from_update,
     extract_post_text,
     extract_private_message,
-    tg_answer_callback_query,
     tg_send_message,
     tg_set_webhook,
 )
-from app.vk import VkError, vk_groups_get_admin, vk_wall_post
-from app.vk_oauth import VkOAuthError, build_authorize_url, compute_expires_at, exchange_code_for_token, generate_pkce_pair
+from app.vk import VkError, vk_verify_community_token, vk_wall_post
 
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -62,16 +57,11 @@ async def _shutdown() -> None:
         await pool.close()
 
 
-def _vk_redirect_uri() -> str:
-    return f"{settings.app_base_url.rstrip('/')}{settings.vk_redirect_path}"
-
-
-def _kb(button_rows: Iterable[list[tuple[str, str]]]) -> dict:
-    return {
-        "inline_keyboard": [
-            [{"text": text, "callback_data": data} for (text, data) in row] for row in button_rows
-        ]
-    }
+def _mask_token(token: str) -> str:
+    t = token.strip()
+    if len(t) <= 14:
+        return "***"
+    return f"{t[:8]}…{t[-4:]}"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -107,74 +97,105 @@ async def telegram_webhook(secret: str, request: Request):
                     bot_token=settings.telegram_bot_token,
                     chat_id=chat_id,
                     text=(
-                        "Я связываю Telegram‑канал → VK‑группу и автопощу посты.\n\n"
+                        "Я читаю посты из Telegram‑канала и публикую текст на стену VK‑сообщества.\n\n"
+                        "1) Возьми ключ доступа сообщества: VK → сообщество → Управление → "
+                        "Работа с API → Ключи доступа (нужны права на стену).\n"
+                        "2) Одной строкой (в личку мне):\n"
+                        "/set_vk <id_группы> <токен>\n"
+                        "Пример: /set_vk 123456789 vk1.a.XXXX…\n\n"
                         "Команды:\n"
-                        "/connect_vk — подключить VK и выбрать группу\n"
-                        "/status — показать текущие настройки\n"
+                        "/set_vk — сохранить группу и токен\n"
+                        "/status — что сохранено\n"
+                        "/clear_vk — удалить сохранённый токен\n"
                         "/enable — включить автопостинг\n"
-                        "/disable — выключить автопостинг\n\n"
-                        "Важно: добавь меня админом в канал, который нужно слушать."
+                        "/disable — выключить\n\n"
+                        "Добавь меня админом в канал, откуда копировать посты."
                     ),
                 )
-            elif text.startswith("/connect_vk"):
-                if from_user and isinstance(from_user.get("id"), int):
-                    if not settings.vk_oauth_configured:
-                        await tg_send_message(
-                            bot_token=settings.telegram_bot_token,
-                            chat_id=chat_id,
-                            text=(
-                                "VK OAuth не настроен на сервере.\n\n"
-                                "В Railway → твой сервис → Variables добавь:\n"
-                                "- VK_CLIENT_ID\n"
-                                "- VK_CLIENT_SECRET\n\n"
-                                "Потом Redeploy. Без них приложение не сможет открыть авторизацию VK."
-                            ),
-                        )
-                        return {"ok": True}
-                    tg_user_id = int(from_user["id"])
-                    state = secrets.token_urlsafe(24)
-                    verifier, challenge = generate_pkce_pair()
-
-                    pool = await get_pool()
-                    async with pool.acquire() as conn:
-                        await ensure_user(conn, tg_user_id)
-                        await conn.execute(
-                            """
-                            INSERT INTO oauth_states(state, tg_user_id)
-                            VALUES ($1, $2)
-                            ON CONFLICT (state) DO UPDATE SET tg_user_id=excluded.tg_user_id
-                            """,
-                            state,
-                            tg_user_id,
-                        )
-                        await conn.execute(
-                            """
-                            INSERT INTO oauth_pkce(tg_user_id, code_verifier)
-                            VALUES ($1, $2)
-                            ON CONFLICT (tg_user_id) DO UPDATE SET code_verifier=excluded.code_verifier, created_at=now()
-                            """,
-                            tg_user_id,
-                            verifier,
-                        )
-                        await conn.execute(
-                            "UPDATE user_settings SET updated_at=now() WHERE tg_user_id=$1",
-                            tg_user_id,
-                        )
-
-                    scope = "groups wall"
-                    url = build_authorize_url(
-                        client_id=settings.vk_client_id,
-                        redirect_uri=_vk_redirect_uri(),
-                        state=state,
-                        code_challenge=challenge,
-                        scope=scope,
-                    )
+            elif text.startswith("/set_vk") and from_user and isinstance(from_user.get("id"), int):
+                tg_user_id = int(from_user["id"])
+                rest = text[len("/set_vk") :].strip()
+                parts = rest.split(None, 1)
+                if len(parts) < 2:
                     await tg_send_message(
                         bot_token=settings.telegram_bot_token,
                         chat_id=chat_id,
-                        text=f"Открой ссылку и разреши доступ VK:\n{url}\n\nПосле этого я покажу список твоих групп.",
-                        disable_web_page_preview=True,
+                        text="Формат: /set_vk <id_группы> <токен>\nПример: /set_vk 123456789 vk1.a.…",
                     )
+                    return {"ok": True}
+                try:
+                    group_id = int(parts[0].strip())
+                except ValueError:
+                    await tg_send_message(
+                        bot_token=settings.telegram_bot_token,
+                        chat_id=chat_id,
+                        text="id_группы должен быть числом (без минуса), например 123456789.",
+                    )
+                    return {"ok": True}
+                token = parts[1].strip()
+                if not token:
+                    await tg_send_message(
+                        bot_token=settings.telegram_bot_token,
+                        chat_id=chat_id,
+                        text="Токен пустой. Формат: /set_vk <id_группы> <токен>",
+                    )
+                    return {"ok": True}
+                try:
+                    gname = await vk_verify_community_token(
+                        token=token, api_version=settings.vk_api_version, group_id=group_id
+                    )
+                except VkError as e:
+                    await tg_send_message(
+                        bot_token=settings.telegram_bot_token,
+                        chat_id=chat_id,
+                        text=f"VK не принял токен/группу: {e}\nПроверь id группы и что ключ выдан именно этому сообществу.",
+                    )
+                    return {"ok": True}
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await ensure_user(conn, tg_user_id)
+                    await conn.execute(
+                        """
+                        INSERT INTO vk_accounts(tg_user_id, vk_user_id, access_token, expires_at)
+                        VALUES ($1, NULL, $2, NULL)
+                        ON CONFLICT (tg_user_id) DO UPDATE SET access_token=excluded.access_token,
+                            vk_user_id=NULL, expires_at=NULL
+                        """,
+                        tg_user_id,
+                        token,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE user_settings
+                        SET selected_vk_group_id=$1, updated_at=now()
+                        WHERE tg_user_id=$2
+                        """,
+                        group_id,
+                        tg_user_id,
+                    )
+                label = f" «{gname}»" if gname else ""
+                await tg_send_message(
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    text=(
+                        f"Ок: группа {group_id}{label}, токен сохранён ({_mask_token(token)}).\n"
+                        "Добавь меня админом в канал и напиши /enable."
+                    ),
+                )
+            elif text.startswith("/clear_vk") and from_user and isinstance(from_user.get("id"), int):
+                tg_user_id = int(from_user["id"])
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute("DELETE FROM vk_accounts WHERE tg_user_id=$1", tg_user_id)
+                    await conn.execute(
+                        "UPDATE user_settings SET selected_vk_group_id=NULL, enabled=FALSE, updated_at=now() WHERE tg_user_id=$1",
+                        tg_user_id,
+                    )
+                await tg_send_message(
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    text="Токен и привязка к группе удалены. Автопостинг выключен.",
+                )
             elif text.startswith("/status") and from_user and isinstance(from_user.get("id"), int):
                 tg_user_id = int(from_user["id"])
                 pool = await get_pool()
@@ -183,11 +204,19 @@ async def telegram_webhook(secret: str, request: Request):
                         "SELECT selected_vk_group_id, enabled FROM user_settings WHERE tg_user_id=$1",
                         tg_user_id,
                     )
+                    acc = await conn.fetchrow(
+                        "SELECT access_token FROM vk_accounts WHERE tg_user_id=$1", tg_user_id
+                    )
                 if st:
+                    tok = _mask_token(str(acc["access_token"])) if acc and acc.get("access_token") else "(нет)"
                     await tg_send_message(
                         bot_token=settings.telegram_bot_token,
                         chat_id=chat_id,
-                        text=f"VK group_id: {st['selected_vk_group_id']}\nEnabled: {bool(st['enabled'])}",
+                        text=(
+                            f"VK group_id: {st['selected_vk_group_id']}\n"
+                            f"Токен: {tok}\n"
+                            f"Автопостинг: {'вкл' if st['enabled'] else 'выкл'}"
+                        ),
                     )
             elif text.startswith("/enable") and from_user and isinstance(from_user.get("id"), int):
                 tg_user_id = int(from_user["id"])
@@ -212,39 +241,6 @@ async def telegram_webhook(secret: str, request: Request):
                     bot_token=settings.telegram_bot_token, chat_id=chat_id, text="Автопостинг выключен."
                 )
 
-        return {"ok": True}
-
-    cq = extract_callback_query(update)
-    if cq:
-        cq_id = str(cq.get("id"))
-        from_user = cq.get("from") if isinstance(cq.get("from"), dict) else None
-        msg2 = cq.get("message") if isinstance(cq.get("message"), dict) else None
-        chat2 = msg2.get("chat") if msg2 and isinstance(msg2.get("chat"), dict) else None
-        chat_id = int(chat2["id"]) if chat2 and isinstance(chat2.get("id"), int) else None
-        data = cq.get("data")
-        if chat_id is None or not isinstance(data, str) or not from_user or not isinstance(from_user.get("id"), int):
-            return {"ok": True}
-
-        tg_user_id = int(from_user["id"])
-        if data.startswith("vk_group:"):
-            group_id = int(data.split(":", 1)[1])
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                await ensure_user(conn, tg_user_id)
-                await conn.execute(
-                    "UPDATE user_settings SET selected_vk_group_id=$1, updated_at=now() WHERE tg_user_id=$2",
-                    group_id,
-                    tg_user_id,
-                )
-
-            await tg_answer_callback_query(
-                bot_token=settings.telegram_bot_token, callback_query_id=cq_id, text="Группа выбрана"
-            )
-            await tg_send_message(
-                bot_token=settings.telegram_bot_token,
-                chat_id=chat_id,
-                text=f"Ок, выбрал VK‑группу {group_id}. Теперь добавь меня админом в Telegram‑канал и включи /enable.",
-            )
         return {"ok": True}
 
     channel = extract_channel_from_update(update)
@@ -319,93 +315,13 @@ async def telegram_webhook(secret: str, request: Request):
 
 
 @app.get("/vk/callback")
-async def vk_callback(code: str | None = None, state: str | None = None, error: str | None = None):
-    if not settings.vk_oauth_configured:
-        return HTMLResponse(
-            "VK OAuth is not configured (missing VK_CLIENT_ID / VK_CLIENT_SECRET on server).",
-            status_code=503,
-        )
-    if error:
-        return HTMLResponse(f"VK auth error: {error}", status_code=400)
-    if not code or not state:
-        return HTMLResponse("Missing code/state", status_code=400)
-
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT tg_user_id FROM oauth_states WHERE state=$1", state)
-        if not row:
-            return HTMLResponse("Unknown state", status_code=400)
-        tg_user_id = int(row["tg_user_id"])
-        pk = await conn.fetchrow("SELECT code_verifier FROM oauth_pkce WHERE tg_user_id=$1", tg_user_id)
-        if not pk:
-            return HTMLResponse("Missing PKCE verifier", status_code=400)
-        verifier = str(pk["code_verifier"])
-
-    try:
-        token_payload = await exchange_code_for_token(
-            client_id=settings.vk_client_id,
-            client_secret=settings.vk_client_secret,
-            code=code,
-            redirect_uri=_vk_redirect_uri(),
-            code_verifier=verifier,
-        )
-    except (VkOAuthError, Exception) as e:
-        return HTMLResponse(f"Token exchange failed: {e}", status_code=400)
-
-    access_token = str(token_payload["access_token"])
-    vk_user_id = token_payload.get("user_id")
-    expires_at = compute_expires_at(token_payload.get("expires_in"))
-
-    async with pool.acquire() as conn:
-        await ensure_user(conn, tg_user_id)
-        await conn.execute(
-            """
-            INSERT INTO vk_accounts(tg_user_id, vk_user_id, access_token, expires_at)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (tg_user_id) DO UPDATE SET vk_user_id=excluded.vk_user_id,
-                                                 access_token=excluded.access_token,
-                                                 expires_at=excluded.expires_at
-            """,
-            tg_user_id,
-            vk_user_id,
-            access_token,
-            expires_at,
-        )
-        await conn.execute("DELETE FROM oauth_states WHERE state=$1", state)
-
-    # Fetch admin groups and send choices to user in Telegram
-    try:
-        groups = await vk_groups_get_admin(token=access_token, api_version=settings.vk_api_version)
-    except VkError:
-        groups = []
-
-    if not groups:
-        # Still notify user
-        await tg_send_message(
-            bot_token=settings.telegram_bot_token,
-            chat_id=tg_user_id,
-            text="VK подключен, но я не смог получить список админских групп (нет прав groups или VK не отдал список).",
-        )
-        return RedirectResponse("https://t.me/", status_code=302)
-
-    # Build inline keyboard with up to 10 groups per page (minimal: first 10)
-    buttons: list[list[tuple[str, str]]] = []
-    for g in groups[:10]:
-        gid = g.get("id")
-        name = g.get("name") or f"group {gid}"
-        if isinstance(gid, int):
-            buttons.append([(str(name)[:40], f"vk_group:{gid}")])
-
-    await tg_send_message(
-        bot_token=settings.telegram_bot_token,
-        chat_id=tg_user_id,
-        text="Выбери VK‑группу для автопостинга:",
-        reply_markup=_kb(buttons),
+async def vk_callback():
+    return HTMLResponse(
+        "OAuth VK отключён. В Telegram напиши боту: /set_vk &lt;id_группы&gt; &lt;токен сообщества&gt;",
+        status_code=410,
     )
-
-    return HTMLResponse("VK connected. You can return to Telegram.")
 
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "vk_oauth_configured": settings.vk_oauth_configured}
+    return {"ok": True, "mode": "community_token"}

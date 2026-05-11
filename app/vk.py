@@ -22,22 +22,20 @@ async def vk_api_call(*, method: str, token: str, api_version: str, params: dict
     return payload["response"]
 
 
-async def vk_groups_get_admin(*, token: str, api_version: str) -> list[dict]:
+async def vk_verify_community_token(*, token: str, api_version: str, group_id: int) -> str:
+    """Проверяет, что токен сообщества подходит к group_id. Возвращает короткое имя группы или ''."""
+    gid = str(abs(int(group_id)))
     resp = await vk_api_call(
-        method="groups.get",
+        method="groups.getById",
         token=token,
         api_version=api_version,
-        params={
-            "filter": "admin",
-            "extended": "1",
-            "fields": "name,screen_name",
-            "count": "200",
-        },
+        params={"group_ids": gid, "fields": "name"},
     )
-    items = resp.get("items") if isinstance(resp, dict) else None
-    if not isinstance(items, list):
-        return []
-    return [i for i in items if isinstance(i, dict)]
+    groups = resp if isinstance(resp, list) else []
+    if not groups or not isinstance(groups[0], dict):
+        raise VkError("groups.getById: пустой ответ")
+    name = groups[0].get("name")
+    return str(name) if name else ""
 
 
 async def vk_wall_post(

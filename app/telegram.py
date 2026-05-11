@@ -19,13 +19,6 @@ def extract_private_message(update: dict) -> dict | None:
     return msg
 
 
-def extract_callback_query(update: dict) -> dict | None:
-    cq = update.get("callback_query")
-    if not isinstance(cq, dict):
-        return None
-    return cq
-
-
 def extract_channel_from_update(update: dict) -> dict | None:
     msg = update.get("channel_post") or update.get("edited_channel_post")
     if not isinstance(msg, dict):
@@ -58,7 +51,7 @@ async def tg_set_webhook(*, bot_token: str, base_url: str, secret_path: str) -> 
     url = f"{base_url.rstrip('/')}/telegram/webhook/{secret_path}"
     payload = {
         "url": url,
-        "allowed_updates": ["message", "callback_query", "channel_post", "edited_channel_post", "my_chat_member"],
+        "allowed_updates": ["message", "channel_post", "edited_channel_post", "my_chat_member"],
     }
 
     async with httpx.AsyncClient(timeout=20) as client:
@@ -93,16 +86,4 @@ async def tg_send_message(
     if not data.get("ok"):
         raise TelegramError(f"sendMessage failed: {data}")
 
-
-async def tg_answer_callback_query(*, bot_token: str, callback_query_id: str, text: str | None = None) -> None:
-    payload: dict = {"callback_query_id": callback_query_id}
-    if text:
-        payload["text"] = text
-        payload["show_alert"] = False
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery", json=payload)
-        r.raise_for_status()
-        data = r.json()
-    if not data.get("ok"):
-        raise TelegramError(f"answerCallbackQuery failed: {data}")
 

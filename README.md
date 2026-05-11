@@ -1,15 +1,15 @@
 # TG → VK Autoposter (всё через Telegram‑бота)
 
-Сервис без веб‑панели: управление подключением делается командами боту. Веб‑часть нужна только как VK OAuth callback.
+Сервис без веб‑панели: настройка — командами боту в Telegram. Публичный URL нужен только для **Telegram webhook**.
 
 ## Что делает
 
 - Слушает посты в Telegram‑канале через webhook (`channel_post`).
 - Публикует текст в VK‑группу через `wall.post`.
-- Настройка через бота:
-  - `/connect_vk` → открыть ссылку VK‑авторизации → бот покажет список админских групп → выбрать группу кнопкой.
-  - `/enable` / `/disable` — включить/выключить автопостинг.
-  - `/status` — посмотреть текущие настройки.
+- Настройка через бота (токен сообщества VK, без OAuth):
+  - `/set_vk <id_группы> <токен>` — ключ из «Работа с API» сообщества + числовой id группы.
+  - `/enable` / `/disable` — автопостинг.
+  - `/status` / `/clear_vk` — посмотреть или сбросить токен.
 
 ## Запуск (Windows / PowerShell)
 
@@ -25,11 +25,10 @@ pip install -r requirements.txt
 
 - Скопируй `.env.example` → `.env`
 - Заполни:
-  - `APP_BASE_URL` — публичный URL сервиса (для VK callback и Telegram webhook)
+  - `APP_BASE_URL` — публичный URL сервиса (для Telegram webhook)
   - `DATABASE_URL` — строка подключения к Postgres
   - `TELEGRAM_BOT_TOKEN`
   - `TELEGRAM_WEBHOOK_SECRET`
-  - `VK_CLIENT_ID`, `VK_CLIENT_SECRET`
 
 3) Запусти:
 
@@ -48,9 +47,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - `APP_BASE_URL=https://your-domain` (обязательно **https** для Telegram/VK)
 - `TELEGRAM_BOT_TOKEN=...`
 - `TELEGRAM_WEBHOOK_SECRET=...`
-- `VK_CLIENT_ID=...`
-- `VK_CLIENT_SECRET=...`
-
 2) Подними сервис:
 
 ```bash
@@ -114,13 +110,13 @@ docker compose up -d
 ## Как пользоваться
 
 1) Напиши боту `/start`.
-2) Подключи VK: `/connect_vk` → открой ссылку → разреши доступ → вернись в Telegram → выбери группу кнопкой.
+2) В VK создай **ключ доступа сообщества** (стена и нужные права), узнай **числовой id группы**, в Telegram: `/set_vk <id> <токен>`.
 3) Добавь бота админом в Telegram‑канал, который нужно читать.
 4) Включи автопостинг: `/enable`.
 
-## Важно про VK права
+## Важно про VK
 
-Этот прототип использует токен, полученный через VK ID OAuth. В зависимости от текущих ограничений VK, доступ к `groups.get`/`wall.post` может требовать дополнительных прав/разрешений приложения.
+Используется **ключ сообщества** (service/community token), не OAuth. У ключа в настройках VK должны быть права на **публикацию на стене** (`wall.post`).
 
 ## База
 
@@ -140,22 +136,21 @@ Railway даст тебе:
 - **New Project → Deploy from GitHub Repo**
 - Затем **Add → Database → PostgreSQL**
 
-3) В переменных Railway (**Variables у того же сервиса**, что и веб‑приложение) добавь обязательно:
+3) В переменных Railway (**Variables** сервиса с приложением) обязательно:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
-- **`VK_CLIENT_ID`** и **`VK_CLIENT_SECRET`** (из кабинета VK ID / приложения; без них контейнер раньше падал при старте — сейчас сервис поднимется, но `/connect_vk` не заработает, пока не добавишь)
+- `APP_BASE_URL` (после генерации домена)
 - `VK_API_VERSION` (опционально, по умолчанию `5.199`)
 
-`DATABASE_URL` Railway обычно добавит сам после подключения Postgres (или подключи переменную из сервиса Postgres к сервису приложения).
+`DATABASE_URL` — из подключённого Postgres.
 
-Проверка после деплоя: открой `https://<твой-домен>/health` — в ответе должно быть `"vk_oauth_configured": true`, когда VK‑переменные заданы.
+Токен VK пользователь передаёт **боту в Telegram** (`/set_vk`), в Railway его задавать не нужно.
 
 4) После первого деплоя Railway покажет публичный домен вида `https://xxxxx.up.railway.app`.
 Поставь:
 - `APP_BASE_URL=https://xxxxx.up.railway.app`
 
-5) В VK кабинете в Redirect URI укажи:
-- `https://xxxxx.up.railway.app/vk/callback`
+5) Redirect URI в VK для этого режима **не нужен** (OAuth не используется).
 
-Готово: пиши боту `/start`, потом `/connect_vk`.
+Готово: `/start` → `/set_vk …` → добавить бота в канал → `/enable`.
 
