@@ -64,6 +64,37 @@ def _mask_token(token: str) -> str:
     return f"{t[:8]}…{t[-4:]}"
 
 
+def _cmd_base(text: str) -> str:
+    """Первое слово команды без @botname."""
+    if not text:
+        return ""
+    return text.split(None, 1)[0].split("@", 1)[0]
+
+
+TOKEN_HELP_RU = (
+    "Как получить ключ (токен) сообщества VK\n\n"
+    "Нужно быть администратором или создателем сообщества.\n\n"
+    "Через сайт vk.com (с компьютера удобнее):\n"
+    "1) Зайди на страницу своего сообщества.\n"
+    "2) Слева открой «Управление» (или «Настройки» у сообщества).\n"
+    "3) В меню слева найди «Работа с API», «API», «Для разработчиков» или похожий пункт "
+    "(название зависит от типа сообщества и версии интерфейса).\n"
+    "4) Открой раздел с ключами доступа / токенами («Ключи доступа», «Создать ключ»).\n"
+    "5) Создай новый ключ и отметь права, чтобы можно было писать на стене: "
+    "обычно это «Стена» / wall / публикация записей от имени сообщества.\n"
+    "6) Сохрани и скопируй токен — он часто показывается один раз. "
+    "Если не успела скопировать, создай новый ключ.\n\n"
+    "Числовой id группы (для команды /set_vk):\n"
+    "• Если ссылка на сообщество вида vk.com/club123456789 — число после club это id (123456789).\n"
+    "• Если ссылка vk.com/public123456789 — число после public тоже id.\n"
+    "• Либо в «Управлении» / «Настройках» иногда указан «ID сообщества».\n\n"
+    "Дальше в этот чат отправь одной строкой:\n"
+    "/set_vk <id> <токен>\n"
+    "Пример: /set_vk 123456789 vk1.a.длинная_строка…\n\n"
+    "Важно: токен — секрет. Не публикуй его в каналах и чатах; здесь он уходит только на этот сервис."
+)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return HTMLResponse("OK")
@@ -92,27 +123,35 @@ async def telegram_webhook(secret: str, request: Request):
         chat = msg.get("chat") if isinstance(msg.get("chat"), dict) else None
         chat_id = int(chat["id"]) if chat and isinstance(chat.get("id"), int) else None
         if chat_id is not None:
-            if text.startswith("/start"):
+            if _cmd_base(text) == "/start":
                 await tg_send_message(
                     bot_token=settings.telegram_bot_token,
                     chat_id=chat_id,
                     text=(
                         "Я читаю посты из Telegram‑канала и публикую текст на стену VK‑сообщества.\n\n"
-                        "1) Возьми ключ доступа сообщества: VK → сообщество → Управление → "
-                        "Работа с API → Ключи доступа (нужны права на стену).\n"
-                        "2) Одной строкой (в личку мне):\n"
+                        "Как взять токен VK — пошагово: напиши /token_help\n\n"
+                        "Кратко:\n"
+                        "1) VK → твоё сообщество → Управление → Работа с API → ключ с правом на стену.\n"
+                        "2) В этот чат одной строкой:\n"
                         "/set_vk <id_группы> <токен>\n"
                         "Пример: /set_vk 123456789 vk1.a.XXXX…\n\n"
                         "Команды:\n"
+                        "/token_help — как получить токен и id группы\n"
                         "/set_vk — сохранить группу и токен\n"
                         "/status — что сохранено\n"
-                        "/clear_vk — удалить сохранённый токен\n"
+                        "/clear_vk — удалить токен\n"
                         "/enable — включить автопостинг\n"
                         "/disable — выключить\n\n"
                         "Добавь меня админом в канал, откуда копировать посты."
                     ),
                 )
-            elif text.startswith("/set_vk") and from_user and isinstance(from_user.get("id"), int):
+            elif _cmd_base(text) == "/token_help":
+                await tg_send_message(
+                    bot_token=settings.telegram_bot_token,
+                    chat_id=chat_id,
+                    text=TOKEN_HELP_RU,
+                )
+            elif _cmd_base(text) == "/set_vk" and from_user and isinstance(from_user.get("id"), int):
                 tg_user_id = int(from_user["id"])
                 rest = text[len("/set_vk") :].strip()
                 parts = rest.split(None, 1)
@@ -120,7 +159,11 @@ async def telegram_webhook(secret: str, request: Request):
                     await tg_send_message(
                         bot_token=settings.telegram_bot_token,
                         chat_id=chat_id,
-                        text="Формат: /set_vk <id_группы> <токен>\nПример: /set_vk 123456789 vk1.a.…",
+                        text=(
+                            "Формат: /set_vk <id_группы> <токен>\n"
+                            "Пример: /set_vk 123456789 vk1.a.…\n\n"
+                            "Как взять токен и id: /token_help"
+                        ),
                     )
                     return {"ok": True}
                 try:
@@ -182,7 +225,7 @@ async def telegram_webhook(secret: str, request: Request):
                         "Добавь меня админом в канал и напиши /enable."
                     ),
                 )
-            elif text.startswith("/clear_vk") and from_user and isinstance(from_user.get("id"), int):
+            elif _cmd_base(text) == "/clear_vk" and from_user and isinstance(from_user.get("id"), int):
                 tg_user_id = int(from_user["id"])
                 pool = await get_pool()
                 async with pool.acquire() as conn:
@@ -196,7 +239,7 @@ async def telegram_webhook(secret: str, request: Request):
                     chat_id=chat_id,
                     text="Токен и привязка к группе удалены. Автопостинг выключен.",
                 )
-            elif text.startswith("/status") and from_user and isinstance(from_user.get("id"), int):
+            elif _cmd_base(text) == "/status" and from_user and isinstance(from_user.get("id"), int):
                 tg_user_id = int(from_user["id"])
                 pool = await get_pool()
                 async with pool.acquire() as conn:
@@ -218,7 +261,7 @@ async def telegram_webhook(secret: str, request: Request):
                             f"Автопостинг: {'вкл' if st['enabled'] else 'выкл'}"
                         ),
                     )
-            elif text.startswith("/enable") and from_user and isinstance(from_user.get("id"), int):
+            elif _cmd_base(text) == "/enable" and from_user and isinstance(from_user.get("id"), int):
                 tg_user_id = int(from_user["id"])
                 pool = await get_pool()
                 async with pool.acquire() as conn:
@@ -229,7 +272,7 @@ async def telegram_webhook(secret: str, request: Request):
                 await tg_send_message(
                     bot_token=settings.telegram_bot_token, chat_id=chat_id, text="Автопостинг включен."
                 )
-            elif text.startswith("/disable") and from_user and isinstance(from_user.get("id"), int):
+            elif _cmd_base(text) == "/disable" and from_user and isinstance(from_user.get("id"), int):
                 tg_user_id = int(from_user["id"])
                 pool = await get_pool()
                 async with pool.acquire() as conn:
