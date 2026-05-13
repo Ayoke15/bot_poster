@@ -63,6 +63,28 @@ async def tg_set_webhook(*, bot_token: str, base_url: str, secret_path: str) -> 
         raise TelegramError(f"setWebhook failed: {data}")
 
 
+async def tg_set_my_commands(*, bot_token: str) -> None:
+    """Меню команд слева от поля ввода в Telegram."""
+    commands = [
+        {"command": "start", "description": "Приветствие и кнопки"},
+        {"command": "token_help", "description": "То же, что «Как подключить»"},
+        {"command": "set_vk", "description": "Сохранить id группы и токен"},
+        {"command": "status", "description": "Что сохранено"},
+        {"command": "enable", "description": "Включить автопостинг"},
+        {"command": "disable", "description": "Выключить автопостинг"},
+        {"command": "clear_vk", "description": "Удалить токен VK"},
+    ]
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            f"https://api.telegram.org/bot{bot_token}/setMyCommands",
+            json={"commands": commands},
+        )
+        r.raise_for_status()
+        data = r.json()
+    if not data.get("ok"):
+        raise TelegramError(f"setMyCommands failed: {data}")
+
+
 async def tg_send_message(
     *,
     bot_token: str,
