@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, Request
@@ -20,9 +21,12 @@ from app.vk import VkError, vk_verify_community_token, vk_wall_post
 from app.vk_parse import parse_vk_group_id_from_text
 
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL env var is required (Postgres)")
+    raise RuntimeError("Нужна переменная окружения DATABASE_URL")
+# Railway отдаёт postgres:// — asyncpg понимает postgresql://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://") :]
 
 app = FastAPI(title="TG → VK Autoposter")
 
@@ -36,7 +40,14 @@ async def get_pool() -> asyncpg.Pool:
 
 @app.on_event("startup")
 async def _startup() -> None:
-    app.state.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    host = urlparse(DATABASE_URL).hostname or "?"
+    try:
+        app.state.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    except Exception as e:
+        raise RuntimeError(
+            f"Не подключился к Postgres. В DATABASE_URL хост: {host!r}. "
+            f"На Railway возьми DATABASE_URL из сервиса PostgreSQL (не @db: из примера). Ошибка: {e}"
+        ) from e
     pool = await get_pool()
     async with pool.acquire() as conn:
         await init_db(conn)
