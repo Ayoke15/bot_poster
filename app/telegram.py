@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import logging
+
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramError(RuntimeError):
@@ -93,19 +98,25 @@ async def tg_send_message(
     reply_markup: dict | None = None,
     disable_web_page_preview: bool = True,
 ) -> None:
-    payload: dict = {
-        "chat_id": chat_id,
+    # Telegram надёжнее принимает reply_markup как JSON-строку в form body, не вложенный dict.
+    data: dict[str, str] = {
+        "chat_id": str(chat_id),
         "text": text,
-        "disable_web_page_preview": disable_web_page_preview,
     }
+    if disable_web_page_preview:
+        data["disable_web_page_preview"] = "true"
     if reply_markup:
-        payload["reply_markup"] = reply_markup
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
     async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json=payload)
+        r = await client.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            data=data,
+        )
         r.raise_for_status()
-        data = r.json()
-    if not data.get("ok"):
-        raise TelegramError(f"sendMessage failed: {data}")
+        body = r.json()
+    if not body.get("ok"):
+        logger.error("sendMessage failed: %s", body)
+        raise TelegramError(f"sendMessage failed: {body}")
 
 

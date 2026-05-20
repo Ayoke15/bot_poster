@@ -17,6 +17,7 @@ from app.telegram import (
     tg_set_webhook,
 )
 from app.vk import VkError, vk_verify_community_token, vk_wall_post
+from app.vk_parse import parse_vk_group_id_from_text
 
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -81,35 +82,154 @@ BTN_ENABLE = "▶️ Включить"
 BTN_DISABLE = "⏹ Выключить"
 BTN_CLEAR = "🗑 Сбросить VK"
 BTN_HOME = "🏠 Главная"
+BTN_LINK_VK = "🔗 Подключить VK"
+
+ALL_MENU_BUTTONS = frozenset(
+    {
+        BTN_LINK_VK,
+        BTN_CONNECT,
+        BTN_FORMAT,
+        BTN_STATUS,
+        BTN_ENABLE,
+        BTN_DISABLE,
+        BTN_CLEAR,
+        BTN_HOME,
+    }
+)
+
+VK_STEP_IDLE = 0
+VK_STEP_LINK = 1
+VK_STEP_TOKEN = 2
+
+VK_MSG_ASK_LINK = (
+    "Шаг 1 из 2. Пришли одной строкой ссылку на сообщество VK "
+    "(скопируй из адресной строки браузера).\n\n"
+    "Примеры:\n"
+    "https://vk.com/club123456789\n"
+    "https://vk.com/public123456789\n\n"
+    "Если ссылка только с коротким именем без club/public — открой страницу сообщества "
+    "и скопируй адрес, где в пути есть club… или public…."
+)
+
+VK_MSG_ASK_TOKEN = (
+    "Шаг 2 из 2. Сообщество: id {gid}.\n\n"
+    "Теперь отдельным сообщением пришли токен доступа сообщества одной строкой. "
+    "Где взять ключ — кнопка «Как подключить», блок про API."
+)
+
+
+async def _clear_vk_connect_flow(conn: asyncpg.Connection, tg_user_id: int) -> None:
+    await conn.execute(
+        """
+        UPDATE user_settings
+        SET vk_connect_step=0, vk_connect_group_id=NULL, updated_at=now()
+        WHERE tg_user_id=$1
+        """,
+        tg_user_id,
+    )
+
+
+async def _set_vk_connect_await_link(conn: asyncpg.Connection, tg_user_id: int) -> None:
+    await conn.execute(
+        """
+        UPDATE user_settings
+        SET vk_connect_step=$2, vk_connect_group_id=NULL, updated_at=now()
+        WHERE tg_user_id=$1
+        """,
+        tg_user_id,
+        VK_STEP_LINK,
+    )
+
+
+async def _set_vk_connect_await_token(conn: asyncpg.Connection, tg_user_id: int, group_id: int) -> None:
+    await conn.execute(
+        """
+        UPDATE user_settings
+        SET vk_connect_step=$2, vk_connect_group_id=$3, updated_at=now()
+        WHERE tg_user_id=$1
+        """,
+        tg_user_id,
+        VK_STEP_TOKEN,
+        int(group_id),
+    )
+
+
+async def _persist_vk_token(*, tg_user_id: int, group_id: int, token: str) -> tuple[bool, str]:
+    token = (token or "").strip()
+    if len(token) < 12:
+        return False, "Токен слишком короткий — пришли целиком ключ доступа сообщества одной строкой."
+    try:
+        gname = await vk_verify_community_token(
+            token=token, api_version=settings.vk_api_version, group_id=group_id
+        )
+    except VkError as e:
+        return (
+            False,
+            f"VK не принял токен или группу: {e}\nПроверь, что ключ выдан именно этому сообществу.",
+        )
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await ensure_user(conn, tg_user_id)
+        await conn.execute(
+            """
+            INSERT INTO vk_accounts(tg_user_id, vk_user_id, access_token, expires_at)
+            VALUES ($1, NULL, $2, NULL)
+            ON CONFLICT (tg_user_id) DO UPDATE SET access_token=excluded.access_token,
+                vk_user_id=NULL, expires_at=NULL
+            """,
+            tg_user_id,
+            token,
+        )
+        await conn.execute(
+            """
+            UPDATE user_settings
+            SET selected_vk_group_id=$1, updated_at=now()
+            WHERE tg_user_id=$2
+            """,
+            group_id,
+            tg_user_id,
+        )
+        await _clear_vk_connect_flow(conn, tg_user_id)
+    label = f" «{gname}»" if gname else ""
+    return (
+        True,
+        (
+            f"Готово: сообщество {group_id}{label}, токен сохранён ({_mask_token(token)}).\n"
+            "Добавь меня админом в канал и нажми «Включить»."
+        ),
+    )
 
 
 def _main_menu_keyboard() -> dict:
+    """Reply-клавиатура: панель кнопок над полем ввода (не под пузырём сообщения)."""
     return {
         "keyboard": [
+            [{"text": BTN_LINK_VK}],
             [{"text": BTN_CONNECT}],
             [{"text": BTN_FORMAT}, {"text": BTN_STATUS}],
             [{"text": BTN_ENABLE}, {"text": BTN_DISABLE}],
             [{"text": BTN_CLEAR}, {"text": BTN_HOME}],
         ],
         "resize_keyboard": True,
-        "is_persistent": True,
-        "input_field_placeholder": "Сначала кнопки, для токена: /set_vk id …",
+        "one_time_keyboard": False,
     }
 
 
 WELCOME_RU = (
     "✅ Бот на связи.\n\n"
     "Я переношу текст постов из Telegram‑канала на стену VK‑сообщества.\n\n"
-    "Дальше жми кнопки снизу. Вся пошаговая инструкция (VK + канал) — «Как подключить»."
+    "Подключение VK: кнопка «Подключить VK» (сначала ссылка на сообщество, потом токен). "
+    "Полная инструкция — «Как подключить»."
 )
 
 
 FORMAT_SET_VK_RU = (
-    "Введи в этот чат одной строкой (с клавиатуры или вручную):\n\n"
+    "Для опытных пользователей — всё одной строкой:\n\n"
     "/set_vk <числовой_id_группы> <токен>\n\n"
     "Пример:\n"
     "/set_vk 123456789 vk1.a.длинная_строка…\n\n"
-    "Откуда взять id и токен — кнопка «Как подключить»."
+    "Проще: кнопка «Подключить VK» — сначала ссылка vk.com/club…, потом токен вторым сообщением.\n"
+    "Откуда взять токен — «Как подключить»."
 )
 
 
@@ -117,8 +237,10 @@ CONNECT_GUIDE_RU = (
     "🔌 Как подключить бота и VK\n\n"
     "── Telegram ──\n"
     "1) Добавь меня в нужный канал администратором (без этого я не увижу посты канала).\n"
-    "2) Настрой VK по блоку ниже и отправь сюда строку /set_vk … (кнопка «Формат /set_vk»).\n"
-    "3) Нажми «Включить» — после этого начнётся автопостинг в группу VK.\n\n"
+    "2) Нажми «Подключить VK»: первым сообщением пришли ссылку на сообщество "
+    "(из адресной строки, например vk.com/club…), вторым — токен доступа сообщества.\n"
+    "   Альтернатива: одной строкой /set_vk (кнопка «Формат /set_vk»).\n"
+    "3) Нажми «Включить» — после этого начнётся автопостинг на стену VK.\n\n"
     "── VK: ключ сообщества ──\n"
     "Нужно быть администратором или создателем сообщества.\n\n"
     "Через сайт vk.com (с компьютера удобнее):\n"
@@ -129,12 +251,7 @@ CONNECT_GUIDE_RU = (
     "4) Открой раздел с ключами доступа («Ключи доступа», «Создать ключ»).\n"
     "5) Создай ключ и отметь права на публикацию на стене от имени сообщества (wall / «Стена»).\n"
     "6) Скопируй токен — часто показывается один раз; если не успела — создай новый ключ.\n\n"
-    "Числовой id группы для /set_vk:\n"
-    "• Ссылка vk.com/club123456789 → id = 123456789.\n"
-    "• Ссылка vk.com/public123456789 → id = 123456789.\n"
-    "• Иногда id указан в настройках сообщества.\n\n"
-    "Затем в этот чат одной строкой:\n"
-    "/set_vk <id> <токен>\n\n"
+    "Из ссылки vk.com/club123456789 или public… число в конце — это id группы (бот разберёт сам).\n\n"
     "Токен — секрет: не отправляй его в каналы и публичные чаты."
 )
 
@@ -165,209 +282,239 @@ async def telegram_webhook(secret: str, request: Request):
     # Private chat commands / callbacks
     msg = extract_private_message(update)
     if msg:
-        from_user = msg.get("from") if isinstance(msg.get("from"), dict) else None
-        if from_user and isinstance(from_user.get("id"), int):
-            tg_user_id = int(from_user["id"])
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                await ensure_user(conn, tg_user_id)
-
         text = msg.get("text") if isinstance(msg.get("text"), str) else ""
         chat = msg.get("chat") if isinstance(msg.get("chat"), dict) else None
         chat_id = int(chat["id"]) if chat and isinstance(chat.get("id"), int) else None
-        if chat_id is not None:
-            raw = (text or "").strip()
+        from_user = msg.get("from") if isinstance(msg.get("from"), dict) else None
 
-            if not from_user or not isinstance(from_user.get("id"), int):
-                return {"ok": True}
+        if chat_id is None or not from_user or not isinstance(from_user.get("id"), int):
+            return {"ok": True}
 
-            if raw == BTN_CONNECT:
-                await _send_private(chat_id=chat_id, text=CONNECT_GUIDE_RU)
-            elif raw == BTN_FORMAT:
-                await _send_private(chat_id=chat_id, text=FORMAT_SET_VK_RU)
-            elif raw == BTN_HOME:
-                await _send_private(chat_id=chat_id, text=WELCOME_RU)
-            elif raw == BTN_STATUS:
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    st = await conn.fetchrow(
-                        "SELECT selected_vk_group_id, enabled FROM user_settings WHERE tg_user_id=$1",
-                        tg_user_id,
-                    )
-                    acc = await conn.fetchrow(
-                        "SELECT access_token FROM vk_accounts WHERE tg_user_id=$1", tg_user_id
-                    )
-                if st:
-                    tok = _mask_token(str(acc["access_token"])) if acc and acc.get("access_token") else "(нет)"
-                    await _send_private(
-                        chat_id=chat_id,
-                        text=(
-                            f"VK group_id: {st['selected_vk_group_id']}\n"
-                            f"Токен: {tok}\n"
-                            f"Автопостинг: {'вкл' if st['enabled'] else 'выкл'}"
-                        ),
-                    )
-                else:
-                    await _send_private(chat_id=chat_id, text="Настроек пока нет. Нажми «Главная» или «Как подключить».")
-            elif raw == BTN_ENABLE:
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE user_settings SET enabled=TRUE, updated_at=now() WHERE tg_user_id=$1",
-                        tg_user_id,
-                    )
-                await _send_private(chat_id=chat_id, text="Автопостинг включен.")
-            elif raw == BTN_DISABLE:
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE user_settings SET enabled=FALSE, updated_at=now() WHERE tg_user_id=$1",
-                        tg_user_id,
-                    )
-                await _send_private(chat_id=chat_id, text="Автопостинг выключен.")
-            elif raw == BTN_CLEAR:
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    await conn.execute("DELETE FROM vk_accounts WHERE tg_user_id=$1", tg_user_id)
-                    await conn.execute(
-                        "UPDATE user_settings SET selected_vk_group_id=NULL, enabled=FALSE, updated_at=now() WHERE tg_user_id=$1",
-                        tg_user_id,
-                    )
-                await _send_private(
-                    chat_id=chat_id,
-                    text="Токен и привязка к группе удалены. Автопостинг выключен.",
+        tg_user_id = int(from_user["id"])
+        raw = (text or "").strip()
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await ensure_user(conn, tg_user_id)
+            st_row = await conn.fetchrow(
+                "SELECT vk_connect_step, vk_connect_group_id FROM user_settings WHERE tg_user_id=$1",
+                tg_user_id,
+            )
+        step = int(st_row["vk_connect_step"] or 0) if st_row else 0
+        pending_gid = (
+            int(st_row["vk_connect_group_id"])
+            if st_row and st_row["vk_connect_group_id"] is not None
+            else None
+        )
+
+        if raw == BTN_LINK_VK:
+            async with pool.acquire() as conn:
+                await _set_vk_connect_await_link(conn, tg_user_id)
+            await _send_private(chat_id=chat_id, text=VK_MSG_ASK_LINK)
+        elif raw == BTN_HOME:
+            async with pool.acquire() as conn:
+                await _clear_vk_connect_flow(conn, tg_user_id)
+            await _send_private(chat_id=chat_id, text=WELCOME_RU)
+        elif raw == BTN_CONNECT:
+            await _send_private(chat_id=chat_id, text=CONNECT_GUIDE_RU)
+        elif raw == BTN_FORMAT:
+            await _send_private(chat_id=chat_id, text=FORMAT_SET_VK_RU)
+        elif raw == BTN_STATUS:
+            async with pool.acquire() as conn:
+                st = await conn.fetchrow(
+                    "SELECT selected_vk_group_id, enabled FROM user_settings WHERE tg_user_id=$1",
+                    tg_user_id,
                 )
-            elif _cmd_base(text) == "/start":
-                await _send_private(chat_id=chat_id, text=WELCOME_RU)
-            elif _cmd_base(text) == "/token_help":
-                await _send_private(chat_id=chat_id, text=CONNECT_GUIDE_RU)
-            elif _cmd_base(text) == "/set_vk":
-                parts0 = text.strip().split(None, 1)
-                rest = parts0[1].strip() if len(parts0) > 1 else ""
-                parts = rest.split(None, 1)
-                if len(parts) < 2:
-                    await _send_private(
-                        chat_id=chat_id,
-                        text=(
-                            "Формат: /set_vk <id_группы> <токен>\n"
-                            "Пример: /set_vk 123456789 vk1.a.…\n\n"
-                            "Как взять id и токен: кнопка «Как подключить», формат строки — «Формат /set_vk»."
-                        ),
-                    )
-                    return {"ok": True}
-                try:
-                    group_id = int(parts[0].strip())
-                except ValueError:
-                    await _send_private(
-                        chat_id=chat_id,
-                        text="id_группы должен быть числом (без минуса), например 123456789.",
-                    )
-                    return {"ok": True}
-                token = parts[1].strip()
-                if not token:
-                    await _send_private(
-                        chat_id=chat_id,
-                        text="Токен пустой. Формат: /set_vk <id_группы> <токен>",
-                    )
-                    return {"ok": True}
-                try:
-                    gname = await vk_verify_community_token(
-                        token=token, api_version=settings.vk_api_version, group_id=group_id
-                    )
-                except VkError as e:
-                    await _send_private(
-                        chat_id=chat_id,
-                        text=(
-                            f"VK не принял токен/группу: {e}\n"
-                            "Проверь id группы и что ключ выдан именно этому сообществу."
-                        ),
-                    )
-                    return {"ok": True}
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    await ensure_user(conn, tg_user_id)
-                    await conn.execute(
-                        """
-                        INSERT INTO vk_accounts(tg_user_id, vk_user_id, access_token, expires_at)
-                        VALUES ($1, NULL, $2, NULL)
-                        ON CONFLICT (tg_user_id) DO UPDATE SET access_token=excluded.access_token,
-                            vk_user_id=NULL, expires_at=NULL
-                        """,
-                        tg_user_id,
-                        token,
-                    )
-                    await conn.execute(
-                        """
-                        UPDATE user_settings
-                        SET selected_vk_group_id=$1, updated_at=now()
-                        WHERE tg_user_id=$2
-                        """,
-                        group_id,
-                        tg_user_id,
-                    )
-                label = f" «{gname}»" if gname else ""
+                acc = await conn.fetchrow(
+                    "SELECT access_token FROM vk_accounts WHERE tg_user_id=$1", tg_user_id
+                )
+            if st:
+                tok = _mask_token(str(acc["access_token"])) if acc and acc.get("access_token") else "(нет)"
                 await _send_private(
                     chat_id=chat_id,
                     text=(
-                        f"Ок: группа {group_id}{label}, токен сохранён ({_mask_token(token)}).\n"
-                        "Добавь меня админом в канал и нажми «Включить»."
+                        f"VK group_id: {st['selected_vk_group_id']}\n"
+                        f"Токен: {tok}\n"
+                        f"Автопостинг: {'вкл' if st['enabled'] else 'выкл'}"
                     ),
                 )
-            elif _cmd_base(text) == "/clear_vk":
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    await conn.execute("DELETE FROM vk_accounts WHERE tg_user_id=$1", tg_user_id)
-                    await conn.execute(
-                        "UPDATE user_settings SET selected_vk_group_id=NULL, enabled=FALSE, updated_at=now() WHERE tg_user_id=$1",
-                        tg_user_id,
-                    )
+            else:
+                await _send_private(
+                    chat_id=chat_id, text="Настроек пока нет. Нажми «Главная» или «Как подключить»."
+                )
+        elif raw == BTN_ENABLE:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE user_settings SET enabled=TRUE, updated_at=now() WHERE tg_user_id=$1",
+                    tg_user_id,
+                )
+            await _send_private(chat_id=chat_id, text="Автопостинг включен.")
+        elif raw == BTN_DISABLE:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE user_settings SET enabled=FALSE, updated_at=now() WHERE tg_user_id=$1",
+                    tg_user_id,
+                )
+            await _send_private(chat_id=chat_id, text="Автопостинг выключен.")
+        elif raw == BTN_CLEAR:
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM vk_accounts WHERE tg_user_id=$1", tg_user_id)
+                await conn.execute(
+                    """
+                    UPDATE user_settings
+                    SET selected_vk_group_id=NULL, enabled=FALSE,
+                        vk_connect_step=0, vk_connect_group_id=NULL, updated_at=now()
+                    WHERE tg_user_id=$1
+                    """,
+                    tg_user_id,
+                )
+            await _send_private(
+                chat_id=chat_id,
+                text="Токен и привязка к группе удалены. Автопостинг выключен.",
+            )
+        elif _cmd_base(text) == "/start":
+            async with pool.acquire() as conn:
+                await _clear_vk_connect_flow(conn, tg_user_id)
+            await _send_private(chat_id=chat_id, text=WELCOME_RU)
+        elif _cmd_base(text) == "/token_help":
+            await _send_private(chat_id=chat_id, text=CONNECT_GUIDE_RU)
+        elif _cmd_base(text) == "/set_vk":
+            parts0 = text.strip().split(None, 1)
+            rest = parts0[1].strip() if len(parts0) > 1 else ""
+            parts = rest.split(None, 1)
+            if len(parts) < 2:
                 await _send_private(
                     chat_id=chat_id,
-                    text="Токен и привязка к группе удалены. Автопостинг выключен.",
+                    text=(
+                        "Формат: /set_vk <id_группы> <токен>\n"
+                        "Проще: кнопка «Подключить VK» — ссылка на сообщество, затем токен вторым сообщением.\n"
+                        "Подробности — «Формат /set_vk» или «Как подключить»."
+                    ),
                 )
-            elif _cmd_base(text) == "/status":
-                pool = await get_pool()
+                return {"ok": True}
+            try:
+                group_id = int(parts[0].strip())
+            except ValueError:
+                await _send_private(
+                    chat_id=chat_id,
+                    text="id_группы должен быть числом (без минуса), например 123456789.",
+                )
+                return {"ok": True}
+            token = parts[1].strip()
+            if not token:
+                await _send_private(
+                    chat_id=chat_id,
+                    text="Токен пустой. Формат: /set_vk <id_группы> <токен>",
+                )
+                return {"ok": True}
+            ok, msgtext = await _persist_vk_token(
+                tg_user_id=tg_user_id, group_id=group_id, token=token
+            )
+            await _send_private(chat_id=chat_id, text=msgtext)
+        elif _cmd_base(text) == "/clear_vk":
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM vk_accounts WHERE tg_user_id=$1", tg_user_id)
+                await conn.execute(
+                    """
+                    UPDATE user_settings
+                    SET selected_vk_group_id=NULL, enabled=FALSE,
+                        vk_connect_step=0, vk_connect_group_id=NULL, updated_at=now()
+                    WHERE tg_user_id=$1
+                    """,
+                    tg_user_id,
+                )
+            await _send_private(
+                chat_id=chat_id,
+                text="Токен и привязка к группе удалены. Автопостинг выключен.",
+            )
+        elif _cmd_base(text) == "/status":
+            async with pool.acquire() as conn:
+                st = await conn.fetchrow(
+                    "SELECT selected_vk_group_id, enabled FROM user_settings WHERE tg_user_id=$1",
+                    tg_user_id,
+                )
+                acc = await conn.fetchrow(
+                    "SELECT access_token FROM vk_accounts WHERE tg_user_id=$1", tg_user_id
+                )
+            if st:
+                tok = _mask_token(str(acc["access_token"])) if acc and acc.get("access_token") else "(нет)"
+                await _send_private(
+                    chat_id=chat_id,
+                    text=(
+                        f"VK group_id: {st['selected_vk_group_id']}\n"
+                        f"Токен: {tok}\n"
+                        f"Автопостинг: {'вкл' if st['enabled'] else 'выкл'}"
+                    ),
+                )
+            else:
+                await _send_private(
+                    chat_id=chat_id, text="Настроек пока нет. Нажми «Главная» или «Как подключить»."
+                )
+        elif _cmd_base(text) == "/enable":
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE user_settings SET enabled=TRUE, updated_at=now() WHERE tg_user_id=$1",
+                    tg_user_id,
+                )
+            await _send_private(chat_id=chat_id, text="Автопостинг включен.")
+        elif _cmd_base(text) == "/disable":
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE user_settings SET enabled=FALSE, updated_at=now() WHERE tg_user_id=$1",
+                    tg_user_id,
+                )
+            await _send_private(chat_id=chat_id, text="Автопостинг выключен.")
+        elif (
+            step == VK_STEP_TOKEN
+            and raw
+            and not raw.startswith("/")
+            and raw not in ALL_MENU_BUTTONS
+        ):
+            if pending_gid is None:
                 async with pool.acquire() as conn:
-                    st = await conn.fetchrow(
-                        "SELECT selected_vk_group_id, enabled FROM user_settings WHERE tg_user_id=$1",
-                        tg_user_id,
-                    )
-                    acc = await conn.fetchrow(
-                        "SELECT access_token FROM vk_accounts WHERE tg_user_id=$1", tg_user_id
-                    )
-                if st:
-                    tok = _mask_token(str(acc["access_token"])) if acc and acc.get("access_token") else "(нет)"
+                    await _clear_vk_connect_flow(conn, tg_user_id)
+                await _send_private(
+                    chat_id=chat_id,
+                    text="Не удалось продолжить подключение VK — нажми «Подключить VK» и начни с шага 1.",
+                )
+            else:
+                new_gid = parse_vk_group_id_from_text(raw)
+                if new_gid is not None:
+                    async with pool.acquire() as conn:
+                        await _set_vk_connect_await_token(conn, tg_user_id, new_gid)
                     await _send_private(
                         chat_id=chat_id,
-                        text=(
-                            f"VK group_id: {st['selected_vk_group_id']}\n"
-                            f"Токен: {tok}\n"
-                            f"Автопостинг: {'вкл' if st['enabled'] else 'выкл'}"
-                        ),
+                        text=VK_MSG_ASK_TOKEN.format(gid=new_gid),
                     )
                 else:
-                    await _send_private(chat_id=chat_id, text="Настроек пока нет. Нажми «Главная» или «Как подключить».")
-            elif _cmd_base(text) == "/enable":
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE user_settings SET enabled=TRUE, updated_at=now() WHERE tg_user_id=$1",
-                        tg_user_id,
+                    ok, msgtext = await _persist_vk_token(
+                        tg_user_id=tg_user_id, group_id=pending_gid, token=raw
                     )
-                await _send_private(chat_id=chat_id, text="Автопостинг включен.")
-            elif _cmd_base(text) == "/disable":
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE user_settings SET enabled=FALSE, updated_at=now() WHERE tg_user_id=$1",
-                        tg_user_id,
-                    )
-                await _send_private(chat_id=chat_id, text="Автопостинг выключен.")
-            elif raw and not raw.startswith("/"):
+                    await _send_private(chat_id=chat_id, text=msgtext)
+        elif (
+            step == VK_STEP_LINK
+            and raw
+            and not raw.startswith("/")
+            and raw not in ALL_MENU_BUTTONS
+        ):
+            gid = parse_vk_group_id_from_text(raw)
+            if gid is None:
                 await _send_private(
                     chat_id=chat_id,
-                    text="Не понял сообщение. Жми кнопку снизу или «Главная».",
+                    text=(
+                        "Не вижу в сообщении ссылку на сообщество VK. Пришли, например:\n"
+                        "https://vk.com/club123456789\n"
+                        "или https://vk.com/public123456789"
+                    ),
                 )
+            else:
+                async with pool.acquire() as conn:
+                    await _set_vk_connect_await_token(conn, tg_user_id, gid)
+                await _send_private(chat_id=chat_id, text=VK_MSG_ASK_TOKEN.format(gid=gid))
+        elif raw and not raw.startswith("/") and raw not in ALL_MENU_BUTTONS:
+            await _send_private(
+                chat_id=chat_id,
+                text="Не понял сообщение. Жми кнопку снизу или «Главная».",
+            )
 
         return {"ok": True}
 
@@ -445,7 +592,7 @@ async def telegram_webhook(secret: str, request: Request):
 @app.get("/vk/callback")
 async def vk_callback():
     return HTMLResponse(
-        "OAuth VK отключён. В Telegram напиши боту: /set_vk &lt;id_группы&gt; &lt;токен сообщества&gt;",
+        "OAuth VK отключён. В Telegram: кнопка «Подключить VK» или команда /set_vk.",
         status_code=410,
     )
 

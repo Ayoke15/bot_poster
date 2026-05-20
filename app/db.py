@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS oauth_pkce (
 
 async def init_db(conn: asyncpg.Connection) -> None:
     await conn.execute(SCHEMA_SQL)
+    await conn.execute(
+        "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS vk_connect_step SMALLINT NOT NULL DEFAULT 0"
+    )
+    await conn.execute(
+        "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS vk_connect_group_id BIGINT"
+    )
 
 
 async def ensure_user(conn: asyncpg.Connection, tg_user_id: int) -> None:
