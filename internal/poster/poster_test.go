@@ -837,6 +837,15 @@ func TestVKBindingUpsertAndSingleCommunityPerUser(t *testing.T) {
 	if count(t, s, "SELECT count(*) FROM poster_posts WHERE owner_id=1 AND group_id=99 AND status='cancelled'") != 1 {
 		t.Fatal("old group's queued publication was not cancelled")
 	}
+	var replacementNotice string
+	if e = s.Store.Pool.QueryRow(context.Background(), "SELECT body FROM poster_notifications WHERE owner_id=1 ORDER BY id DESC LIMIT 1").Scan(&replacementNotice); e != nil {
+		t.Fatal(e)
+	}
+	for _, expected := range []string{"99 → 100", "Старая привязка отключена", "Ожидающие задания отменены: 1", "может успеть опубликоваться"} {
+		if !strings.Contains(replacementNotice, expected) {
+			t.Fatalf("missing replacement warning %q: %s", expected, replacementNotice)
+		}
+	}
 	if count(t, s, "SELECT count(*) FROM poster_users WHERE user_id=2 AND group_id=99 AND token_version=1") != 1 {
 		t.Fatal("another user's binding changed")
 	}
@@ -862,5 +871,31 @@ func TestVKBindingUpsertAndSingleCommunityPerUser(t *testing.T) {
 	}
 	if f.posts != 0 {
 		t.Fatal("token verification published a probe")
+	}
+}
+
+func TestVKConnectionWarnings(t *testing.T) {
+	s, _ := fixture(t, false)
+	for i, command := range []string{"/start", "/format", "/connect_vk", "vk.com/club99"} {
+		accept(t, s, int64(i+1), commandMessage(1, command), false)
+		var reply string
+		if e := s.Store.Pool.QueryRow(context.Background(), "SELECT body FROM poster_notifications WHERE owner_id=1 ORDER BY id DESC LIMIT 1").Scan(&reply); e != nil {
+			t.Fatal(e)
+		}
+		if !strings.Contains(reply, "заменит прежнюю") || !strings.Contains(reply, "ожидающие публикации будут отменены") {
+			t.Fatalf("command %s lacks advance warning: %s", command, reply)
+		}
+	}
+	accept(t, s, 5, commandMessage(1, "first-private-token"), false)
+	if count(t, s, "SELECT count(*) FROM poster_notifications WHERE body LIKE '%Сообщество VK заменено%'") != 0 {
+		t.Fatal("first connection reported a replacement")
+	}
+	accept(t, s, 6, commandMessage(1, "/set_vk 99 another-private-token"), false)
+	var reply string
+	if e := s.Store.Pool.QueryRow(context.Background(), "SELECT body FROM poster_notifications WHERE owner_id=1 ORDER BY id DESC LIMIT 1").Scan(&reply); e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(reply, "Токен сообщества VK 99 обновлён") || strings.Contains(reply, "Сообщество VK заменено") {
+		t.Fatalf("same-group token update misleading: %s", reply)
 	}
 }
