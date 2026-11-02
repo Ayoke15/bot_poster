@@ -1,5 +1,8 @@
 name: Go
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -29,3 +32,47 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/poster_test
       - run: go build ./cmd/bot
+
+  live-integration:
+    name: Live Telegram to VK
+    needs: test
+    if: >-
+      vars.RUN_LIVE_INTEGRATION == 'true' &&
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    concurrency:
+      group: live-telegram-vk-test-bots
+      cancel-in-progress: false
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: poster_live_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d poster_live_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - name: Publish from Telegram, check VK post exists, and clean up
+        run: go test -race -tags=live -run '^TestLiveTelegramToVK$' -count=1 -timeout=5m -v ./internal/poster
+        env:
+          RUN_LIVE_INTEGRATION: 'true'
+          TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/poster_live_test
+          TG_TEST_BOT_TOKEN: ${{ secrets.TG_TEST_BOT_TOKEN }}
+          TG_TEST_SENDER_BOT_TOKEN: ${{ secrets.TG_TEST_SENDER_BOT_TOKEN }}
+          VK_TEST_COMMUNITY_TOKEN: ${{ secrets.VK_TEST_COMMUNITY_TOKEN }}
+          VK_TEST_READ_TOKEN: ${{ secrets.VK_TEST_READ_TOKEN }}
+          TG_TEST_CHANNEL_ID: ${{ vars.TG_TEST_CHANNEL_ID }}
+          TG_TEST_OWNER_ID: ${{ vars.TG_TEST_OWNER_ID }}
+          VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
