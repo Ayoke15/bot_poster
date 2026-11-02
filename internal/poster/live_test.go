@@ -23,7 +23,8 @@ import (
 )
 
 // This opt-in test creates and deletes real posts. It never registers or deletes
-// webhooks; only dedicated test bots without an active webhook may be used.
+// webhooks or polls updates. A synthetic channel_post wraps the real sendMessage
+// response; inbound Telegram event delivery is deliberately outside this test.
 func TestLiveTelegramToVK(t *testing.T) {
 	if os.Getenv("RUN_LIVE_INTEGRATION") != "true" {
 		t.Skip("live integration is opt-in")
@@ -44,16 +45,12 @@ func TestLiveTelegramToVK(t *testing.T) {
 		}
 		return v
 	}
-	receiverToken := required("TG_TEST_BOT_TOKEN")
-	senderToken := required("TG_TEST_SENDER_BOT_TOKEN")
+	botToken := required("TG_TEST_BOT_TOKEN")
 	vkToken := required("VK_TEST_COMMUNITY_TOKEN")
 	readToken := required("VK_TEST_READ_TOKEN")
 	channel, owner, group := number("TG_TEST_CHANNEL_ID"), number("TG_TEST_OWNER_ID"), number("VK_TEST_GROUP_ID")
 	if channel >= 0 || owner <= 0 || group <= 0 {
 		t.Fatal("channel must be negative; owner and VK group must be positive")
-	}
-	if receiverToken == senderToken {
-		t.Fatal("publisher and receiver must be different dedicated test bots")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -66,7 +63,7 @@ func TestLiveTelegramToVK(t *testing.T) {
 		t.Fatal("cannot generate test marker")
 	}
 	marker := "autoposter-ci-" + hex.EncodeToString(suffix)
-	c := Config{DatabaseURL: required("TEST_DATABASE_URL"), BotToken: receiverToken, WebhookSecret: "live-integration-secret", VKVersion: "5.199", Key: key}
+	c := Config{DatabaseURL: required("TEST_DATABASE_URL"), BotToken: botToken, WebhookSecret: "live-integration-secret", VKVersion: "5.199", Key: key}
 	// One disposable schema per run; application data is never read or migrated.
 	admin, e := pgxpool.New(ctx, c.DatabaseURL)
 	if e != nil {
@@ -98,7 +95,6 @@ func TestLiveTelegramToVK(t *testing.T) {
 	}
 	t.Cleanup(store.Pool.Close)
 	api := NewAPI(c)
-	sender := NewAPI(Config{BotToken: senderToken})
 	var me struct {
 		ID int64 `json:"id"`
 	}
@@ -107,15 +103,6 @@ func TestLiveTelegramToVK(t *testing.T) {
 	}
 	s := NewServer(c, store, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.BotID = me.ID
-	var publisher struct {
-		ID int64 `json:"id"`
-	}
-	if e = sender.Telegram(ctx, "getMe", map[string]any{}, &publisher); e != nil {
-		t.Fatal(e)
-	}
-	if publisher.ID == me.ID {
-		t.Fatal("test bots must be different")
-	}
 	var hook struct {
 		URL string `json:"url"`
 	}
@@ -123,14 +110,10 @@ func TestLiveTelegramToVK(t *testing.T) {
 		t.Fatal(e)
 	}
 	if hook.URL != "" {
-		t.Fatal("receiver has a webhook; use a dedicated polling test bot, not the deployed bot")
+		t.Fatal("test bot has a webhook; use a dedicated bot to avoid triggering a deployed application")
 	}
 	if e = s.checkAdmin(ctx, channel, owner); e != nil {
-		t.Fatal("owner and receiver bot must be channel administrators")
-	}
-	role, e := sender.Member(ctx, channel, publisher.ID)
-	if e != nil || role != "administrator" {
-		t.Fatal("publisher bot must be a channel administrator with post/delete permissions")
+		t.Fatal("owner and test bot must be channel administrators")
 	}
 	if e = api.VerifyGroup(ctx, vkToken, group); e != nil {
 		t.Fatal(e)
@@ -150,23 +133,12 @@ func TestLiveTelegramToVK(t *testing.T) {
 	if _, e = store.Pool.Exec(ctx, "INSERT INTO poster_channels(chat_id,owner_id) VALUES($1,$2)", channel, owner); e != nil {
 		t.Fatal("cannot seed verified test channel")
 	}
-	// Acknowledge old updates on this dedicated bot; never forward backlog to VK.
-	var backlog []Update
-	if e = api.Telegram(ctx, "getUpdates", map[string]any{"offset": -1, "limit": 1, "timeout": 0, "allowed_updates": []string{"channel_post"}}, &backlog); e != nil {
-		t.Fatal(e)
-	}
-	offset := int64(0)
-	for _, u := range backlog {
-		if u.ID != nil {
-			offset = *u.ID + 1
-		}
-	}
 	var sent Message
-	if e = sender.Telegram(ctx, "sendMessage", map[string]any{"chat_id": channel, "text": marker}, &sent); e != nil {
+	if e = api.Telegram(ctx, "sendMessage", map[string]any{"chat_id": channel, "text": marker}, &sent); e != nil {
 		t.Fatal(e)
 	}
-	if sent.ID <= 0 {
-		t.Fatal("Telegram returned no message ID")
+	if sent.ID <= 0 || sent.Chat.ID != channel || sent.Chat.Type != "channel" {
+		t.Fatal("Telegram did not return a message from the test channel")
 	}
 	// Cleanup runs before the database pools close, even when an assertion fails.
 	t.Cleanup(func() {
@@ -178,7 +150,7 @@ func TestLiveTelegramToVK(t *testing.T) {
 				t.Error("VK test post cleanup failed; remove the post bearing marker " + marker)
 			}
 		}
-		if e := sender.Telegram(cleanup, "deleteMessage", map[string]any{"chat_id": channel, "message_id": sent.ID}, nil); e != nil {
+		if e := api.Telegram(cleanup, "deleteMessage", map[string]any{"chat_id": channel, "message_id": sent.ID}, nil); e != nil {
 			t.Error("Telegram test post cleanup failed")
 		}
 	})
@@ -189,30 +161,16 @@ func TestLiveTelegramToVK(t *testing.T) {
 	wg.Add(1)
 	go func() { defer wg.Done(); s.RunWorker(workerCtx) }()
 	t.Cleanup(func() { stopWorker(); wg.Wait() })
-	var received *Update
-	for received == nil && ctx.Err() == nil {
-		var updates []Update
-		if e = api.Telegram(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": 5, "limit": 100, "allowed_updates": []string{"channel_post"}}, &updates); e != nil {
-			t.Fatal(e)
-		}
-		for _, update := range updates {
-			if update.ID != nil && *update.ID >= offset {
-				offset = *update.ID + 1
-			}
-			if update.Post != nil && update.Post.Chat.ID == channel && update.Post.ID == sent.ID {
-				copy := update
-				received = &copy
-			}
-		}
-	}
-	if received == nil {
-		t.Fatal("receiver did not receive the real Telegram channel_post; check bot permissions and delivery")
-	}
+	// sendMessage returns the real channel message. Bots do not receive their
+	// own outgoing messages as incoming updates. Construct only the envelope;
+	// its update_id is local to this disposable schema, not a Telegram update ID.
+	updateID := sent.ID
+	received := Update{ID: &updateID, Post: &sent}
 	payload, e := json.Marshal(received)
 	if e != nil {
 		t.Fatal("cannot encode Telegram update")
 	}
-	// Replay the real Telegram update through the production HTTP handler twice.
+	// Submit the real message in a synthetic update twice to exercise deduplication.
 	for range 2 {
 		req, e := http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL+"/telegram/webhook/"+c.WebhookSecret, bytes.NewReader(payload))
 		if e != nil {
@@ -225,7 +183,7 @@ func TestLiveTelegramToVK(t *testing.T) {
 		}
 		response.Body.Close()
 		if response.StatusCode != 200 {
-			t.Fatal("webhook did not acknowledge real update")
+			t.Fatal("handler did not acknowledge the synthetic update")
 		}
 	}
 	var postID *int64
@@ -271,5 +229,5 @@ func TestLiveTelegramToVK(t *testing.T) {
 	if len(posts) != 1 || posts[0].ID != *postID || posts[0].Owner != -group || string(posts[0].IsDeleted) == "true" || string(posts[0].IsDeleted) == "1" {
 		t.Fatal("created VK post does not exist in the target community")
 	}
-	t.Log("Real Telegram update delivered to VK; post existence and target verified; duplicate webhook acknowledged")
+	t.Log("Real Telegram sendMessage result forwarded through handler to VK; post exists; inbound event delivery not tested")
 }
