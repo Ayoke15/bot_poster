@@ -1,16 +1,15 @@
-FROM python:3.12-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-WORKDIR /app
-
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-
-COPY app /app/app
-
+# syntax=docker/dockerfile:1
+FROM golang:1.27.3 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+# Optional trust mount for the managed cloud HTTPS proxy; TLS stays enabled.
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then export SSL_CERT_FILE=/run/secrets/proxy_ca; fi; \
+    go mod download && go mod verify
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -ldflags='-s -w' -o /bot ./cmd/bot
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /bot /app/bot
 EXPOSE 8000
-
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
-
+ENTRYPOINT ["/app/bot"]
