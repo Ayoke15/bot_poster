@@ -1,4 +1,5 @@
 CREATE TABLE IF NOT EXISTS poster_users (
+ -- A Telegram user has one current VK binding, stored in this single row.
  user_id BIGINT PRIMARY KEY,
  group_id BIGINT,
  token_cipher TEXT,

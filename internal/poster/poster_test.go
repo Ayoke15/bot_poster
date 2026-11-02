@@ -80,6 +80,7 @@ type fakeAPI struct {
 	mu                           sync.Mutex
 	role                         string
 	vkCode                       int
+	groupID                      int64
 	posts, edits, deletes, sends int
 	last                         url.Values
 	guids                        []string
@@ -116,7 +117,11 @@ func (f *fakeAPI) handler(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "identity must be derived from token", 400)
 				return
 			}
-			io.WriteString(w, `{"response":{"groups":[{"id":99,"can_post":1,"wall":1}]}}`)
+			group := f.groupID
+			if group == 0 {
+				group = 99
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"groups": []map[string]any{{"id": group, "can_post": 1, "wall": 1}}}})
 			return
 		case "wall.post":
 			f.posts++
@@ -802,5 +807,60 @@ func TestTokenPostingCheckRepliesAndPreservesExistingConfig(t *testing.T) {
 				t.Fatal("verification leaked token, published a probe, or failed to delete token message")
 			}
 		})
+	}
+}
+
+func TestVKBindingUpsertAndSingleCommunityPerUser(t *testing.T) {
+	s, f := fixture(t, false)
+	// Exercise the INSERT path directly: no preceding ensureUser call.
+	tx, e := s.Store.Pool.Begin(context.Background())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer tx.Rollback(context.Background())
+	if e = s.saveToken(context.Background(), tx, *commandMessage(2, ""), 99, "second-user-private-token"); e != nil {
+		t.Fatal(e)
+	}
+	if e = tx.Commit(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	if count(t, s, "SELECT count(*) FROM poster_users WHERE user_id=2 AND group_id=99 AND token_version=1 AND NOT enabled") != 1 {
+		t.Fatal("UPSERT did not insert missing user")
+	}
+	seed(t, s)
+	accept(t, s, 100, post(1, "old target"), false)
+	f.groupID = 100
+	accept(t, s, 1, commandMessage(1, "/set_vk 100 replacement-private-token"), false)
+	if count(t, s, "SELECT count(*) FROM poster_users WHERE user_id=1") != 1 || count(t, s, "SELECT count(*) FROM poster_users WHERE user_id=1 AND group_id=100 AND token_version=2") != 1 {
+		t.Fatal("replacement created a second binding or failed to update")
+	}
+	if count(t, s, "SELECT count(*) FROM poster_posts WHERE owner_id=1 AND group_id=99 AND status='cancelled'") != 1 {
+		t.Fatal("old group's queued publication was not cancelled")
+	}
+	if count(t, s, "SELECT count(*) FROM poster_users WHERE user_id=2 AND group_id=99 AND token_version=1") != 1 {
+		t.Fatal("another user's binding changed")
+	}
+	var encrypted string
+	if e = s.Store.Pool.QueryRow(context.Background(), "SELECT token_cipher FROM poster_users WHERE user_id=1").Scan(&encrypted); e != nil {
+		t.Fatal(e)
+	}
+	token, e := s.Store.Cipher.Decrypt(1, encrypted)
+	if e != nil || token != "replacement-private-token" {
+		t.Fatal("replacement token not saved")
+	}
+	// Reconnecting, including switching back, must still leave exactly one binding.
+	f.groupID = 99
+	accept(t, s, 2, commandMessage(1, "/set_vk 99 third-private-token"), false)
+	if count(t, s, "SELECT count(*) FROM poster_users WHERE user_id=1") != 1 || count(t, s, "SELECT count(*) FROM poster_users WHERE user_id=1 AND group_id=99 AND token_version=3") != 1 {
+		t.Fatal("reconnecting duplicated the binding")
+	}
+	if count(t, s, "SELECT count(*) FROM poster_users") != 2 {
+		t.Fatal("unexpected user records")
+	}
+	if _, e = s.Store.Pool.Exec(context.Background(), "INSERT INTO poster_users(user_id,group_id) VALUES(1,200)"); e == nil {
+		t.Fatal("database accepted a second community row for one user")
+	}
+	if f.posts != 0 {
+		t.Fatal("token verification published a probe")
 	}
 }

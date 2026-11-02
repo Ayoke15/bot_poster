@@ -249,7 +249,12 @@ func (s *Server) saveToken(ctx context.Context, tx pgx.Tx, m Message, group int6
 	if e != nil {
 		return e
 	}
-	if _, e = tx.Exec(ctx, "UPDATE poster_users SET group_id=$2,token_cipher=$3,token_version=token_version+1,connect_step=0,pending_group=NULL WHERE user_id=$1", id, group, cipher); e != nil {
+	// One row per Telegram user: a new community replaces the current binding.
+	if _, e = tx.Exec(ctx, `INSERT INTO poster_users(user_id,group_id,token_cipher,token_version)
+		VALUES($1,$2,$3,1)
+		ON CONFLICT(user_id) DO UPDATE SET
+		group_id=excluded.group_id,token_cipher=excluded.token_cipher,
+		token_version=poster_users.token_version+1,connect_step=0,pending_group=NULL`, id, group, cipher); e != nil {
 		return e
 	}
 	if _, e = tx.Exec(ctx, "UPDATE poster_posts SET status='cancelled',last_error='VK credentials changed' WHERE owner_id=$1 AND status IN ('pending','processing')", id); e != nil {
