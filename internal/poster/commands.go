@@ -243,10 +243,7 @@ func (s *Server) saveToken(ctx context.Context, tx pgx.Tx, m Message, group int6
 		return notify(ctx, tx, id, "Токен слишком короткий.")
 	}
 	if e := s.API.VerifyGroup(ctx, token, group); e != nil {
-		if temporary(e) {
-			return e
-		}
-		return notify(ctx, tx, id, "VK не подтвердил токен и группу. Проверьте ключ сообщества и права wall.")
+		return notify(ctx, tx, id, tokenVerificationMessage(e))
 	}
 	cipher, e := s.Store.Cipher.Encrypt(id, token)
 	if e != nil {
@@ -258,6 +255,21 @@ func (s *Server) saveToken(ctx context.Context, tx pgx.Tx, m Message, group int6
 	if _, e = tx.Exec(ctx, "UPDATE poster_posts SET status='cancelled',last_error='VK credentials changed' WHERE owner_id=$1 AND status IN ('pending','processing')", id); e != nil {
 		return e
 	}
-	return notify(ctx, tx, id, "VK подключён. Токен зашифрован. Если сообщение с токеном осталось в чате, удалите его вручную. Проверьте подключение канала через /connect_channel и включите /enable.")
+	return notify(ctx, tx, id, "VK подключён. Проверены права wall и разрешение публикации на стене (can_post). Токен зашифрован. Если сообщение с токеном осталось в чате, удалите его вручную. Проверьте подключение канала через /connect_channel и включите /enable.")
 }
 func temporary(e error) bool { var api *APIError; return errors.As(e, &api) && api.Temporary }
+
+func tokenVerificationMessage(err error) string {
+	var verification *VerificationError
+	if errors.As(err, &verification) {
+		return "Токен не сохранён. " + verification.Message
+	}
+	if temporary(err) {
+		return "VK временно недоступен или ограничил запросы. Проверить публикацию сейчас не удалось, токен не сохранён. Пришлите его повторно немного позже."
+	}
+	var api *APIError
+	if errors.As(err, &api) && (api.Code == 5 || api.Code == 27 || api.Code == 28 || api.Code == 401) {
+		return "VK отклонил токен: он неверный, отозван или истёк. Токен не сохранён. Создайте новый ключ сообщества с правом wall."
+	}
+	return "VK не подтвердил право публикации. Токен не сохранён. Проверьте, что это ключ выбранного сообщества с правом wall, и что стена включена."
+}

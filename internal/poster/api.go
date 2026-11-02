@@ -106,6 +106,12 @@ func (a *API) VK(ctx context.Context, method, token string, values url.Values, r
 	}
 	return nil
 }
+
+// VerificationError contains only a fixed, safe explanation for the bot user.
+type VerificationError struct{ Message string }
+
+func (e *VerificationError) Error() string { return e.Message }
+
 func (a *API) VerifyGroup(ctx context.Context, token string, group int64) error {
 	// Only a community token may pass getTokenPermissions. Require wall access.
 	var rights struct {
@@ -124,16 +130,19 @@ func (a *API) VerifyGroup(ctx context.Context, token string, group int64) error 
 		}
 	}
 	if !wall {
-		return &APIError{"vk", 7, false}
+		return &VerificationError{"У ключа нет права wall. Создайте ключ сообщества с правом публикации на стене."}
 	}
 	var raw json.RawMessage
 	// With a community key and no group_ids, VK returns the token's own group.
 	// Supplying the requested group ID here would only check public visibility.
-	if e := a.VK(ctx, "groups.getById", token, url.Values{}, &raw); e != nil {
+	if e := a.VK(ctx, "groups.getById", token, url.Values{"fields": {"can_post,wall"}}, &raw); e != nil {
 		return e
 	}
 	type groupInfo struct {
-		ID int64 `json:"id"`
+		ID          int64  `json:"id"`
+		CanPost     *int   `json:"can_post"`
+		Wall        *int   `json:"wall"`
+		Deactivated string `json:"deactivated"`
 	}
 	var groups []groupInfo
 	if json.Unmarshal(raw, &groups) != nil {
@@ -146,7 +155,20 @@ func (a *API) VerifyGroup(ctx context.Context, token string, group int64) error 
 		groups = object.Groups
 	}
 	if len(groups) != 1 || groups[0].ID != group {
-		return &APIError{"vk", 100, false}
+		return &VerificationError{"Ключ выдан другому сообществу. Пришлите ключ именно выбранной группы."}
+	}
+	g := groups[0]
+	if g.Deactivated != "" {
+		return &VerificationError{"Сообщество VK заблокировано или удалено. Публикация недоступна."}
+	}
+	if g.Wall != nil && *g.Wall == 0 {
+		return &VerificationError{"Стена сообщества отключена. Включите её в настройках VK и пришлите токен снова."}
+	}
+	if g.CanPost != nil && *g.CanPost == 0 {
+		return &VerificationError{"VK сообщает, что этот токен не может публиковать на стене сообщества. Проверьте права ключа и настройки стены."}
+	}
+	if g.CanPost == nil || *g.CanPost != 1 || g.Wall == nil || *g.Wall < 1 || *g.Wall > 3 {
+		return &VerificationError{"VK не подтвердил возможность публикации: не получены корректные can_post и wall. Проверьте настройки сообщества и повторите подключение."}
 	}
 	return nil
 }

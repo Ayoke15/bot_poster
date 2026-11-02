@@ -86,6 +86,8 @@ type fakeAPI struct {
 	webhookBad                   bool
 	notifyBad                    bool
 	acceptThenFail               bool
+	verifyDenied                 bool
+	verifyTemporary              bool
 	published                    map[string]int64
 	tg                           *httptest.Server
 }
@@ -102,11 +104,19 @@ func (f *fakeAPI) handler(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, `{"response":{"permissions":[{"name":"wall","setting":1}]}}`)
 			return
 		case "groups.getById":
+			if f.verifyTemporary {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			if f.verifyDenied {
+				io.WriteString(w, `{"response":{"groups":[{"id":99,"can_post":0,"wall":1}]}}`)
+				return
+			}
 			if r.Form.Get("group_ids") != "" {
 				http.Error(w, "identity must be derived from token", 400)
 				return
 			}
-			io.WriteString(w, `{"response":{"groups":[{"id":99}]}}`)
+			io.WriteString(w, `{"response":{"groups":[{"id":99,"can_post":1,"wall":1}]}}`)
 			return
 		case "wall.post":
 			f.posts++
@@ -585,16 +595,23 @@ func TestVerifyCommunityIdentity(t *testing.T) {
 		name, permissions, groups string
 		wantError                 bool
 	}{
-		{"own group", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99}]}`, false},
+		{"own group", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"can_post":1,"wall":1}]}`, false},
 		{"different group", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":100}]}`, true},
-		{"no wall permission", `{"permissions":[{"name":"wall","setting":0}]}`, `{"groups":[{"id":99}]}`, true},
-		{"legacy response", `{"permissions":[{"name":"wall","setting":1}]}`, `[{"id":99}]`, false},
+		{"no wall permission", `{"permissions":[{"name":"wall","setting":0}]}`, `{"groups":[{"id":99,"can_post":1,"wall":1}]}`, true},
+		{"posting denied", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"can_post":0,"wall":1}]}`, true},
+		{"wall disabled", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"can_post":1,"wall":0}]}`, true},
+		{"capability missing", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99}]}`, true},
+		{"group blocked", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"can_post":1,"wall":1,"deactivated":"banned"}]}`, true},
+		{"legacy response", `{"permissions":[{"name":"wall","setting":1}]}`, `[{"id":99,"can_post":1,"wall":1}]`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = r.ParseForm()
 				if r.Form.Has("group_ids") || r.Form.Has("group_id") {
 					t.Error("public group lookup used as token verification")
+				}
+				if strings.HasSuffix(r.URL.Path, "getById") && r.Form.Get("fields") != "can_post,wall" {
+					t.Error("posting capabilities not requested")
 				}
 				body := tc.groups
 				if strings.HasSuffix(r.URL.Path, "getTokenPermissions") {
@@ -731,5 +748,59 @@ func TestHTTPBotSetupWorkflow(t *testing.T) {
 	work(t, s)
 	if f.posts != 1 || count(t, s, "SELECT count(*) FROM poster_users WHERE token_cipher IS NOT NULL OR enabled") != 0 || count(t, s, "SELECT count(*) FROM poster_posts WHERE status='cancelled'") != 1 {
 		t.Fatal("clear did not remove token and cancel queued work")
+	}
+}
+
+func TestTokenPostingCheckRepliesAndPreservesExistingConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		twoStep, temporary bool
+	}{
+		{"command denied", false, false}, {"two-step denied", true, false}, {"temporary failure", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, f := fixture(t, false)
+			seed(t, s)
+			accept(t, s, 100, post(1, "queued before token change"), false)
+			var original string
+			if e := s.Store.Pool.QueryRow(context.Background(), "SELECT token_cipher FROM poster_users WHERE user_id=1").Scan(&original); e != nil {
+				t.Fatal(e)
+			}
+			f.verifyDenied = !tc.temporary
+			f.verifyTemporary = tc.temporary
+			if tc.twoStep {
+				accept(t, s, 1, commandMessage(1, "/connect_vk"), false)
+				accept(t, s, 2, commandMessage(1, "vk.com/club99"), false)
+				accept(t, s, 3, commandMessage(1, "new-private-token"), false)
+			} else {
+				accept(t, s, 1, commandMessage(1, "/set_vk 99 new-private-token"), false)
+			}
+			var current string
+			if e := s.Store.Pool.QueryRow(context.Background(), "SELECT token_cipher FROM poster_users WHERE user_id=1").Scan(&current); e != nil {
+				t.Fatal(e)
+			}
+			if current != original || count(t, s, "SELECT count(*) FROM poster_users WHERE token_version=1 AND enabled") != 1 {
+				t.Fatal("rejected token replaced existing configuration")
+			}
+			if count(t, s, "SELECT count(*) FROM poster_posts WHERE status='pending'") != 1 {
+				t.Fatal("rejected token cancelled existing work")
+			}
+			var reply string
+			if e := s.Store.Pool.QueryRow(context.Background(), "SELECT body FROM poster_notifications ORDER BY id DESC LIMIT 1").Scan(&reply); e != nil {
+				t.Fatal(e)
+			}
+			if !strings.Contains(reply, "Токен не сохранён") && !strings.Contains(reply, "токен не сохранён") {
+				t.Fatalf("missing rejection feedback: %s", reply)
+			}
+			if tc.temporary && !strings.Contains(reply, "временно") {
+				t.Fatal("missing temporary failure explanation")
+			}
+			if !tc.temporary && !strings.Contains(reply, "не может публиковать") {
+				t.Fatal("missing posting permission explanation")
+			}
+			if strings.Contains(reply, "new-private-token") || f.posts != 0 || f.deletes != 1 {
+				t.Fatal("verification leaked token, published a probe, or failed to delete token message")
+			}
+		})
 	}
 }
