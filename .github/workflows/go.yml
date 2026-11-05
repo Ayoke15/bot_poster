@@ -1,4 +1,5 @@
 name: Go
+run-name: Go / ${{ github.event_name }} / ${{ github.head_ref || github.ref_name }}
 on:
   push:
   pull_request:
@@ -21,6 +22,25 @@ jobs:
           --health-cmd "pg_isready -U postgres -d poster_test"
           --health-interval 5s --health-timeout 3s --health-retries 20
     steps:
+      - name: Explain live test eligibility
+        env:
+          LIVE_ENABLED: ${{ vars.RUN_LIVE_INTEGRATION == 'true' }}
+          IS_DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
+          IS_MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+          IS_TRUSTED_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          if [ "$LIVE_ENABLED" != true ]; then
+            reason='Skipped: set repository Variable RUN_LIVE_INTEGRATION=true in Settings > Secrets and variables > Actions > Variables. A Secret or Environment variable with that name does not enable this job.'
+          elif [ "$IS_DEPENDABOT" = true ]; then
+            reason='Skipped: Dependabot runs do not receive live test credentials.'
+          elif [ "$IS_MANUAL" != true ] && [ "$IS_TRUSTED_PR" != true ]; then
+            reason='Skipped: live tests run on same-repository pull_request events or workflow_dispatch. A push run intentionally skips this job; open the pull_request run.'
+          else
+            reason='Enabled: Live Telegram to VK will run after the test job passes. If test fails, fix it first; the live job depends on its success.'
+          fi
+          echo "$reason"
+          echo "### Live Telegram to VK" >> "$GITHUB_STEP_SUMMARY"
+          echo "$reason" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
