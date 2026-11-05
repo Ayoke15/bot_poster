@@ -46,8 +46,14 @@ func TestLiveTelegramToVK(t *testing.T) {
 		return v
 	}
 	botToken := required("TG_TEST_BOT_TOKEN")
-	vkToken := required("VK_TEST_COMMUNITY_TOKEN")
-	readToken := required("VK_TEST_READ_TOKEN")
+	vkToken := os.Getenv("VK_TEST_USER_TOKEN")
+	if vkToken == "" {
+		vkToken = required("VK_TEST_COMMUNITY_TOKEN")
+	} // Legacy secret name; the value must still be a user token.
+	readToken := os.Getenv("VK_TEST_READ_TOKEN")
+	if readToken == "" {
+		readToken = vkToken
+	}
 	channel, owner, group := number("TG_TEST_CHANNEL_ID"), number("TG_TEST_OWNER_ID"), number("VK_TEST_GROUP_ID")
 	if channel >= 0 || owner <= 0 || group <= 0 {
 		t.Fatal("channel must be negative; owner and VK group must be positive")

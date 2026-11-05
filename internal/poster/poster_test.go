@@ -101,8 +101,8 @@ func (f *fakeAPI) handler(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		f.last = r.PostForm
 		switch strings.TrimPrefix(r.URL.Path, "/method/") {
-		case "groups.getTokenPermissions":
-			io.WriteString(w, `{"response":{"permissions":[{"name":"wall","setting":1}]}}`)
+		case "account.getAppPermissions":
+			io.WriteString(w, `{"response":8192}`)
 			return
 		case "groups.getById":
 			if f.verifyTemporary {
@@ -110,18 +110,18 @@ func (f *fakeAPI) handler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if f.verifyDenied {
-				io.WriteString(w, `{"response":{"groups":[{"id":99,"can_post":0,"wall":1}]}}`)
+				io.WriteString(w, `{"response":{"groups":[{"id":99,"can_post":0,"wall":1,"is_admin":1,"admin_level":3}]}}`)
 				return
 			}
-			if r.Form.Get("group_ids") != "" {
-				http.Error(w, "identity must be derived from token", 400)
+			if r.Form.Get("group_ids") == "" {
+				http.Error(w, "selected group must be specified", 400)
 				return
 			}
 			group := f.groupID
 			if group == 0 {
 				group = 99
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"groups": []map[string]any{{"id": group, "can_post": 1, "wall": 1}}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"groups": []map[string]any{{"id": group, "can_post": 1, "wall": 1, "is_admin": 1, "admin_level": 3}}}})
 			return
 		case "wall.post":
 			f.posts++
@@ -595,31 +595,34 @@ func TestHealthStaleAndBodyLimits(t *testing.T) {
 	}
 }
 
-func TestVerifyCommunityIdentity(t *testing.T) {
+func TestVerifyUserTokenForGroup(t *testing.T) {
 	for _, tc := range []struct {
 		name, permissions, groups string
 		wantError                 bool
 	}{
-		{"own group", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"can_post":1,"wall":1}]}`, false},
-		{"different group", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":100}]}`, true},
-		{"no wall permission", `{"permissions":[{"name":"wall","setting":0}]}`, `{"groups":[{"id":99,"can_post":1,"wall":1}]}`, true},
-		{"posting denied", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"can_post":0,"wall":1}]}`, true},
-		{"wall disabled", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"can_post":1,"wall":0}]}`, true},
-		{"capability missing", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99}]}`, true},
-		{"group blocked", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"can_post":1,"wall":1,"deactivated":"banned"}]}`, true},
-		{"legacy response", `{"permissions":[{"name":"wall","setting":1}]}`, `[{"id":99,"can_post":1,"wall":1}]`, false},
+		{"own group", `8192`, `{"groups":[{"id":99,"can_post":1,"wall":1,"is_admin":1,"admin_level":3}]}`, false},
+		{"different group", `8192`, `{"groups":[{"id":100}]}`, true},
+		{"no wall permission", `0`, `{"groups":[{"id":99,"can_post":1,"wall":1,"is_admin":1,"admin_level":3}]}`, true},
+		{"posting denied", `8192`, `{"groups":[{"id":99,"can_post":0,"wall":1,"is_admin":1,"admin_level":3}]}`, true},
+		{"wall disabled", `8192`, `{"groups":[{"id":99,"can_post":1,"wall":0,"is_admin":1,"admin_level":3}]}`, true},
+		{"capability missing", `8192`, `{"groups":[{"id":99}]}`, true},
+		{"group blocked", `8192`, `{"groups":[{"id":99,"can_post":1,"wall":1,"is_admin":1,"admin_level":3,"deactivated":"banned"}]}`, true},
+		{"ordinary wall contributor", `8192`, `{"groups":[{"id":99,"can_post":1,"wall":1,"is_admin":0,"admin_level":0}]}`, true},
+		{"moderator cannot post as group", `8192`, `{"groups":[{"id":99,"can_post":1,"wall":1,"is_admin":1,"admin_level":1}]}`, true},
+		{"editor can post", `8192`, `{"groups":[{"id":99,"can_post":1,"wall":1,"is_admin":1,"admin_level":2}]}`, false},
+		{"legacy response", `8192`, `[{"id":99,"can_post":1,"wall":1,"is_admin":1,"admin_level":3}]`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = r.ParseForm()
-				if r.Form.Has("group_ids") || r.Form.Has("group_id") {
-					t.Error("public group lookup used as token verification")
+				if strings.HasSuffix(r.URL.Path, "getById") && r.Form.Get("group_ids") != "99" {
+					t.Error("selected group not requested")
 				}
 				if strings.HasSuffix(r.URL.Path, "getById") && r.Form.Get("fields") != "can_post,wall" {
 					t.Error("posting capabilities not requested")
 				}
 				body := tc.groups
-				if strings.HasSuffix(r.URL.Path, "getTokenPermissions") {
+				if strings.HasSuffix(r.URL.Path, "getAppPermissions") {
 					body = tc.permissions
 				}
 				io.WriteString(w, `{"response":`+body+`}`)
@@ -897,5 +900,26 @@ func TestVKConnectionWarnings(t *testing.T) {
 	}
 	if !strings.Contains(reply, "Токен сообщества VK 99 обновлён") || strings.Contains(reply, "Сообщество VK заменено") {
 		t.Fatalf("same-group token update misleading: %s", reply)
+	}
+}
+
+func TestCommunityTokenRejectedBeforeGroupLookup(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if !strings.HasSuffix(r.URL.Path, "account.getAppPermissions") {
+			t.Error("group lookup performed without user authorization")
+		}
+		io.WriteString(w, `{"error":{"error_code":27,"error_msg":"secret upstream details"}}`)
+	}))
+	defer server.Close()
+	api := NewAPI(Config{})
+	api.VKURL = server.URL
+	err := api.VerifyGroup(context.Background(), "private-community-key", 99)
+	if err == nil || calls != 1 {
+		t.Fatal("non-user key accepted")
+	}
+	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private-community-key") {
+		t.Fatal("sensitive VK details leaked")
 	}
 }

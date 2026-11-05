@@ -238,7 +238,7 @@ func (s *Server) syncWebhook(ctx context.Context) {
 			{"command": "enable", "description": "Включить автопостинг"},
 			{"command": "disable", "description": "Выключить автопостинг"},
 			{"command": "clear_vk", "description": "Удалить токен VK"},
-			{"command": "token_help", "description": "Как получить ключ сообщества"},
+			{"command": "token_help", "description": "Как получить пользовательский ключ VK"},
 		}
 		if commandErr := s.API.Telegram(ctx, "setMyCommands", map[string]any{"commands": commands}, nil); commandErr != nil {
 			s.Log.Warn("telegram command menu registration failed")

@@ -57,7 +57,7 @@ func parseGroup(text string) (int64, error) {
 
 const bindingWarning = "Важно: у одного Telegram-пользователя может быть только одно сообщество VK. Подключение новой группы заменит прежнюю; ожидающие публикации будут отменены. Уже отправляемый пост может успеть опубликоваться."
 
-const helpText = "Я переношу текст и подписи постов из Telegram в VK.\n1. Добавьте бота администратором канала.\n2. /connect_channel -100… — подключить канал (проверю права ваши и бота). ID можно взять у доверенного Telegram-клиента; пересылка поста не подтверждает владение.\n3. 🔗 Подключить VK — ссылка vk.com/club123, затем ключ сообщества с правами wall. Или /set_vk <id> <токен>. Токен отправляйте только сюда.\n4. /enable — включить.\n/status — состояние и последние ошибки; /disable; /disconnect_channel <id>; /clear_vk.\nРедактирование обновляет существующий пост VK. Старые и неизвестные посты не публикуются.\n\n" + bindingWarning
+const helpText = "Я переношу текст и подписи постов из Telegram в VK.\n1. Добавьте бота администратором канала.\n2. /connect_channel -100… — подключить канал (проверю права ваши и бота). ID можно взять у доверенного Telegram-клиента; пересылка поста не подтверждает владение.\n3. 🔗 Подключить VK — ссылка vk.com/club123, затем пользовательский ключ VK с правом wall от редактора или администратора сообщества. Или /set_vk <id> <токен>. Токен отправляйте только сюда.\n4. /enable — включить.\n/status — состояние и последние ошибки; /disable; /disconnect_channel <id>; /clear_vk.\nРедактирование обновляет существующий пост VK. Старые и неизвестные посты не публикуются.\n\n" + bindingWarning
 
 var buttonCommands = map[string]string{"🔗 Подключить VK": "/connect_vk", "🔌 Как подключить": "/token_help", "📝 Формат /set_vk": "/format", "📊 Статус": "/status", "▶️ Включить": "/enable", "⏹ Выключить": "/disable", "🗑 Сбросить VK": "/clear_vk", "🏠 Главная": "/start"}
 
@@ -91,7 +91,7 @@ func (s *Server) command(ctx context.Context, tx pgx.Tx, m Message) error {
 		}
 		return reply(helpText)
 	case "/format":
-		return reply("/set_vk <числовой_id_группы> <токен сообщества>\nИли нажмите «Подключить VK».\n\n" + bindingWarning)
+		return reply("/set_vk <числовой_id_группы> <пользовательский токен VK>\nИли нажмите «Подключить VK».\n\n" + bindingWarning)
 	case "/connect_vk":
 		if _, e := tx.Exec(ctx, "UPDATE poster_users SET connect_step=1,pending_group=NULL WHERE user_id=$1", id); e != nil {
 			return e
@@ -219,7 +219,7 @@ func (s *Server) command(ctx context.Context, tx pgx.Tx, m Message) error {
 		if _, e = tx.Exec(ctx, "UPDATE poster_users SET connect_step=2,pending_group=$2 WHERE user_id=$1", id, group); e != nil {
 			return e
 		}
-		return reply("Теперь пришлите токен сообщества отдельным сообщением. Попробую удалить сообщение после получения.\n\n" + bindingWarning)
+		return reply("Теперь пришлите пользовательский токен VK с правом wall от редактора или администратора выбранной группы отдельным сообщением. Попробую удалить сообщение после получения.\n\n" + bindingWarning)
 	}
 	if text != "" && !strings.HasPrefix(text, "/") && step == 2 && pending != nil {
 		if group, e := parseGroup(text); e == nil {
@@ -290,7 +290,7 @@ func tokenVerificationMessage(err error) string {
 	}
 	var api *APIError
 	if errors.As(err, &api) && (api.Code == 5 || api.Code == 27 || api.Code == 28 || api.Code == 401) {
-		return "VK отклонил токен: он неверный, отозван или истёк. Токен не сохранён. Создайте новый ключ сообщества с правом wall."
+		return "VK отклонил токен: он неверный, отозван или истёк. Токен не сохранён. Получите новый пользовательский ключ VK с правом wall."
 	}
-	return "VK не подтвердил право публикации. Токен не сохранён. Проверьте, что это ключ выбранного сообщества с правом wall, и что стена включена."
+	return "VK не подтвердил право публикации. Токен не сохранён. Проверьте, что это пользовательский ключ VK с правом wall от редактора или администратора выбранного сообщества, и что стена включена."
 }
