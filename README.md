@@ -110,7 +110,7 @@ TEST_DATABASE_URL=postgresql://postgres:password@localhost:5432/poster_test make
 | Secret | `VK_TEST_USER_TOKEN` (или прежний `VK_TEST_COMMUNITY_TOKEN`) | Пользовательский ключ VK API редактора/администратора тестовой группы с разрешением `wall`: публикация и удаление своих постов |
 | Secret, необязательно | `VK_TEST_READ_TOKEN` | Ключ с доступом к `wall.get` и `wall.getById`. Если не задан, используется ключ публикации |
 | Variable | `TG_TEST_CHANNEL_ID` | Числовой ID Telegram-канала вида `-100…` |
-| Variable | `TG_TEST_OWNER_ID` | Telegram ID человека — администратора этого канала |
+| Secret | `TG_TEST_OWNER_ID` | Telegram ID человека — администратора этого канала |
 | Variable | `VK_TEST_GROUP_ID` | Положительный числовой ID сообщества VK |
 | Variable | `RUN_LIVE_INTEGRATION` | `true`, когда все настройки готовы; иначе реальная проверка пропускается |
 

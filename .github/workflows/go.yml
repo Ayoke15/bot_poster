@@ -93,5 +93,5 @@ jobs:
           VK_TEST_USER_TOKEN: ${{ secrets.VK_TEST_USER_TOKEN || secrets.VK_TEST_COMMUNITY_TOKEN }}
           VK_TEST_READ_TOKEN: ${{ secrets.VK_TEST_READ_TOKEN || secrets.VK_TEST_USER_TOKEN || secrets.VK_TEST_COMMUNITY_TOKEN }}
           TG_TEST_CHANNEL_ID: ${{ vars.TG_TEST_CHANNEL_ID }}
-          TG_TEST_OWNER_ID: ${{ vars.TG_TEST_OWNER_ID }}
+          TG_TEST_OWNER_ID: ${{ secrets.TG_TEST_OWNER_ID }}
           VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
