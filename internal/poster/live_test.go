@@ -122,7 +122,7 @@ func TestLiveTelegramToVK(t *testing.T) {
 		t.Fatal("owner and test bot must be channel administrators")
 	}
 	if e = api.VerifyGroup(ctx, vkToken, group); e != nil {
-		t.Fatal(e)
+		t.Fatalf("VK token verification failed: %v. Update GitHub Secret VK_TEST_USER_TOKEN, or VK_TEST_COMMUNITY_TOKEN if the new name is absent. No test posts have been created.", e)
 	}
 	// Confirm the read credential before creating any content.
 	var before json.RawMessage

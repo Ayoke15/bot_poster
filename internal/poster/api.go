@@ -117,6 +117,9 @@ func (a *API) VerifyGroup(ctx context.Context, token string, group int64) error 
 	// does not establish either the token type or the right to post as the group.
 	var permissions int64
 	if e := a.VK(ctx, "account.getAppPermissions", token, url.Values{}, &permissions); e != nil {
+		if apiError, ok := e.(*APIError); ok && apiError.Code == 27 {
+			return fmt.Errorf("account.getAppPermissions: %w; нужен действующий пользовательский VK API ключ с правом wall от редактора или администратора группы; ключ из настроек сообщества не подходит", e)
+		}
 		return e
 	}
 	if permissions&8192 == 0 {

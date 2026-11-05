@@ -919,6 +919,17 @@ func TestCommunityTokenRejectedBeforeGroupLookup(t *testing.T) {
 	if err == nil || calls != 1 {
 		t.Fatal("non-user key accepted")
 	}
+	var upstream *APIError
+	if !errors.As(err, &upstream) || upstream.Code != 27 {
+		t.Fatal("VK error classification lost")
+	}
+	if !strings.Contains(err.Error(), "account.getAppPermissions") || !strings.Contains(err.Error(), "пользовательский VK API ключ") {
+		t.Fatal("missing actionable authorization diagnosis")
+	}
+	reply := tokenVerificationMessage(err)
+	if !strings.Contains(reply, "код 27") || !strings.Contains(reply, "Токен не сохранён") {
+		t.Fatal("bot did not explain authorization failure")
+	}
 	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private-community-key") {
 		t.Fatal("sensitive VK details leaked")
 	}

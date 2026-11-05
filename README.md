@@ -127,3 +127,5 @@ RUN_LIVE_INTEGRATION=true go test -race -tags=live -run '^TestLiveTelegramToVK$'
 ```
 
 После настройки установите repository variable `RUN_LIVE_INTEGRATION=true` и откройте PR из `feat/go-reliable-delivery` в `main`: обычные проверки и живой тест запускаются при открытии и обновлении PR. `workflow_dispatch` доступен в интерфейсе GitHub после появления workflow в основной ветке; до этого запускайте через PR. Ожидаемый результат: зелёные `test` и `Live Telegram to VK`. Сообщение `SKIP` не подтверждает реальную доставку.
+
+Если live-тест останавливается на `account.getAppPermissions` с кодом VK `27`, настроенный ключ не прошёл пользовательскую авторизацию. Обновите GitHub Secret `VK_TEST_USER_TOKEN` (если он задан, он имеет приоритет) либо старый `VK_TEST_COMMUNITY_TOKEN`. Нужен действующий пользовательский VK API ключ с разрешением `wall` от редактора/администратора тестовой группы; ключ из раздела API самого сообщества не подходит. Затем в PR-запуске Actions выберите Re-run failed jobs. На этом этапе тест ещё не создаёт постов в Telegram/VK. Значение ключа не публикуйте в логах и переписке.
