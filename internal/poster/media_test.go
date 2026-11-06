@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"net/http"
@@ -106,12 +107,15 @@ func photoServer(t *testing.T, s *Server, f *fakeAPI) *photoFixture {
 				return
 			}
 			defer r.MultipartForm.RemoveAll()
-			photo, _, e := r.FormFile("photo")
+			photo, header, e := r.FormFile("photo")
 			if e != nil {
 				t.Error(e)
 				return
 			}
 			defer photo.Close()
+			if header.Header.Get("Content-Type") != http.DetectContentType(p.data) {
+				t.Error("multipart must declare the actual image MIME type")
+			}
 			data, _ := io.ReadAll(photo)
 			if !bytes.Equal(data, p.data) {
 				t.Error("uploaded bytes differ from Telegram photo")
@@ -344,6 +348,33 @@ func TestCommunityPhotoUploadFallback(t *testing.T) {
 	media.mu.Unlock()
 	if servers != 1 || saves != 1 || f.posts != 1 || f.last.Get("attachments") != "photo-99_55" || f.last.Get("message") != "Community caption" {
 		t.Fatal("community photo was not attached to wall post")
+	}
+}
+
+func TestCommunityPhotoUploadFormats(t *testing.T) {
+	for _, format := range []string{"png", "jpeg"} {
+		t.Run(format, func(t *testing.T) {
+			s, f := fixture(t, false)
+			seed(t, s)
+			media := photoServer(t, s, f)
+			media.wallServerError = 27
+			if format == "jpeg" {
+				img, e := png.Decode(bytes.NewReader(media.data))
+				if e != nil {
+					t.Fatal(e)
+				}
+				var encoded bytes.Buffer
+				if e = jpeg.Encode(&encoded, img, &jpeg.Options{Quality: 90}); e != nil {
+					t.Fatal(e)
+				}
+				media.data = encoded.Bytes()
+			}
+			accept(t, s, 1, photoMessage(1, "Photo caption", "large-file"), false)
+			work(t, s)
+			if f.posts != 1 || f.last.Get("attachments") != "photo-99_55" || f.last.Get("message") != "Photo caption" {
+				t.Fatal("photo and caption not published")
+			}
+		})
 	}
 }
 func TestPhotoScopeDenialDoesNotSelectDifferentUpload(t *testing.T) {

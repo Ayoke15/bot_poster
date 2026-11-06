@@ -103,6 +103,7 @@ jobs:
           go-version: '1.27.3'
           cache: true
       - name: Probe JPEG and PNG uploads with the existing VK community token
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
           VK_TEST_COMMUNITY_TOKEN: ${{ secrets.VK_TEST_COMMUNITY_TOKEN }}

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"path"
 	"strings"
@@ -88,8 +90,12 @@ func multipartPhoto(field string, photo []byte, filename string, fields map[stri
 			return nil, "", e
 		}
 	}
-	// Match VK's Go SDK upload contract; the filename carries the image type.
-	part, e := w.CreateFormFile(field, filename)
+	// Match the successful curl multipart request: declare the actual image MIME
+	// type instead of CreateFormFile's generic application/octet-stream.
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": field, "filename": filename}))
+	header.Set("Content-Type", http.DetectContentType(photo))
+	part, e := w.CreatePart(header)
 	if e != nil {
 		return nil, "", e
 	}
