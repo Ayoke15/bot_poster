@@ -3,7 +3,6 @@ package poster
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -189,28 +188,6 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 	uploadAPI := *a
 	client := *a.HTTP
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	// Use the same HTTP/1.1 multipart transport as conventional VK upload SDKs.
-	// Clone the configured transport so proxy settings and TLS trust are retained.
-	transport := client.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	if base, ok := transport.(*http.Transport); ok {
-		cloned := base.Clone()
-		protocols := new(http.Protocols)
-		protocols.SetHTTP1(true)
-		cloned.Protocols = protocols
-		cloned.ForceAttemptHTTP2 = false
-		cloned.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
-		if cloned.TLSClientConfig == nil {
-			cloned.TLSClientConfig = &tls.Config{}
-		} else {
-			cloned.TLSClientConfig = cloned.TLSClientConfig.Clone()
-		}
-		cloned.TLSClientConfig.NextProtos = []string{"http/1.1"}
-		client.Transport = cloned
-		defer cloned.CloseIdleConnections()
-	}
 	uploadAPI.HTTP = &client
 	raw, e := uploadAPI.request(ctx, "vk_photo_upload", server.URL, body, contentType)
 	if e != nil {

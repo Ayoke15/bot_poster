@@ -95,9 +95,6 @@ func photoServer(t *testing.T, s *Server, f *fakeAPI) *photoFixture {
 			p.communityServers++
 			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]string{"upload_url": base + "/upload"}})
 		case "/upload":
-			if r.ProtoMajor != 1 {
-				t.Error("VK multipart upload must use HTTP/1.1 even when the API supports HTTP/2")
-			}
 			p.uploads++
 			if p.uploadStatus != 0 {
 				http.Error(w, "private upstream details", p.uploadStatus)
