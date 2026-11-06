@@ -91,12 +91,15 @@ func photoServer(t *testing.T, s *Server, f *fakeAPI) *photoFixture {
 				return
 			}
 			defer r.MultipartForm.RemoveAll()
-			photo, _, e := r.FormFile("photo")
+			photo, fileHeader, e := r.FormFile("photo")
 			if e != nil {
 				t.Error(e)
 				return
 			}
 			defer photo.Close()
+			if fileHeader.Header.Get("Content-Type") != "image/png" {
+				t.Error("image MIME type missing from multipart part")
+			}
 			data, _ := io.ReadAll(photo)
 			if !bytes.Equal(data, p.data) {
 				t.Error("uploaded bytes differ from Telegram photo")

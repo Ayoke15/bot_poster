@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"path"
 	"strings"
@@ -88,7 +90,10 @@ func multipartPhoto(photo []byte, filename string, fields map[string]string) (*b
 			return nil, "", e
 		}
 	}
-	part, e := w.CreateFormFile("photo", filename)
+	headers := make(textproto.MIMEHeader)
+	headers.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "photo", "filename": filename}))
+	headers.Set("Content-Type", http.DetectContentType(photo))
+	part, e := w.CreatePart(headers)
 	if e != nil {
 		return nil, "", e
 	}
@@ -154,7 +159,8 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 	uploadAPI.HTTP = &client
 	raw, e := uploadAPI.request(ctx, "vk_photo_upload", server.URL, body, contentType)
 	if e != nil {
-		return "", e
+		endpoint, _ := url.Parse(server.URL)
+		return "", fmt.Errorf("VK multipart photo upload host=%s, file_type=%s: %w", endpoint.Hostname(), http.DetectContentType(data), e)
 	}
 	var uploaded struct {
 		Photo  string `json:"photo"`

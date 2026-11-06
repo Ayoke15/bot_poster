@@ -45,7 +45,18 @@ func (a *API) request(ctx context.Context, service, endpoint string, body io.Rea
 		return nil, &APIError{service, 0, true}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &APIError{service, resp.StatusCode, resp.StatusCode == 429 || resp.StatusCode >= 500}
+		failure := &APIError{service, resp.StatusCode, resp.StatusCode == 429 || resp.StatusCode >= 500}
+		if service == "vk_photo_upload" {
+			allowed := resp.Header.Get("Allow")
+			for _, ch := range allowed {
+				if !(ch >= 'A' && ch <= 'Z') && ch != ',' && ch != ' ' {
+					allowed = "unavailable"
+					break
+				}
+			}
+			return nil, fmt.Errorf("HTTP POST rejected (allowed methods: %s): %w", allowed, failure)
+		}
+		return nil, failure
 	}
 	return data, nil
 }
