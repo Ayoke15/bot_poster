@@ -84,6 +84,14 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
+      - name: Probe actual VK community-token publication support
+        shell: bash
+        run: |
+          go test -race -tags=live -run '^TestLiveVKCommunityPosting$' -count=1 -timeout=2m -v ./internal/poster 2>&1 | tee "$RUNNER_TEMP/vk-community-probe.log"
+        env:
+          RUN_VK_COMMUNITY_PROBE: 'true'
+          VK_TEST_COMMUNITY_TOKEN: ${{ secrets.VK_TEST_COMMUNITY_TOKEN }}
+          VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
       - name: Publish from Telegram, check VK post exists, and clean up
         shell: bash
         run: |
@@ -103,11 +111,13 @@ jobs:
         run: |
           python3 - <<'PY_ANNOTATE'
           import os, pathlib, re
-          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'live-test.log'
-          if log.exists():
+          for filename in ('vk-community-probe.log', 'live-test.log'):
+              log = pathlib.Path(os.environ['RUNNER_TEMP']) / filename
+              if not log.exists():
+                  continue
               for line in log.read_text(errors='replace').splitlines():
-                  match = re.match(r'\s*live_test\.go:(\d+):\s*(.*)', line)
+                  match = re.match(r'\s*([A-Za-z0-9_]+_test\.go):(\d+):\s*(.*)', line)
                   if match:
-                      message = match[2].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-                      print(f'::error file=internal/poster/live_test.go,line={match[1]},title=Live integration failure::{message}')
+                      message = match[3].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f'::error file=internal/poster/{match[1]},line={match[2]},title=Live integration failure::{message}')
           PY_ANNOTATE
