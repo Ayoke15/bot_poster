@@ -78,8 +78,8 @@ func photoServer(t *testing.T, s *Server, f *fakeAPI) *photoFixture {
 			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]string{"upload_url": endpoint}})
 		case "/method/photos.getMessagesUploadServer":
 			_ = r.ParseForm()
-			if r.Form.Get("peer_id") != "-99" {
-				t.Error("community upload destination missing")
+			if r.Form.Has("peer_id") {
+				t.Error("community upload must not address the group itself as a message peer")
 			}
 			p.communityServers++
 			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]string{"upload_url": base + "/upload"}})

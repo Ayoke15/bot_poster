@@ -140,7 +140,7 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 		}
 		// VK community keys cannot use wall upload endpoints. The supported
 		// community photo upload creates an attachment without sending a message.
-		if e = a.VK(ctx, "photos.getMessagesUploadServer", token, url.Values{"peer_id": {intString(-group)}}, &server); e != nil {
+		if e = a.VK(ctx, "photos.getMessagesUploadServer", token, url.Values{}, &server); e != nil {
 			return "", fmt.Errorf("VK photos.getMessagesUploadServer (check photos permission): %w", e)
 		}
 		saveMethod = "photos.saveMessagesPhoto"
