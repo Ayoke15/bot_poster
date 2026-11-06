@@ -28,14 +28,15 @@ func testPhotoPNG(t *testing.T) []byte {
 }
 
 type photoFixture struct {
-	mu                        sync.Mutex
-	downloads, uploads, saves int
-	fileID                    string
-	path                      string
-	data                      []byte
-	size                      int64
-	uploadURL                 string
-	uploadStatus, saveError   int
+	wallServerError, communityServers, communitySaves int
+	mu                                                sync.Mutex
+	downloads, uploads, saves                         int
+	fileID                                            string
+	path                                              string
+	data                                              []byte
+	size                                              int64
+	uploadURL                                         string
+	uploadStatus, saveError                           int
 }
 
 func (p *photoFixture) counts() (int, int, int) {
@@ -62,6 +63,10 @@ func photoServer(t *testing.T, s *Server, f *fakeAPI) *photoFixture {
 			p.downloads++
 			_, _ = w.Write(p.data)
 		case "/method/photos.getWallUploadServer":
+			if p.wallServerError != 0 {
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"error_code": p.wallServerError}})
+				return
+			}
 			_ = r.ParseForm()
 			if r.Form.Get("group_id") != "99" {
 				t.Error("wrong upload group")
@@ -71,6 +76,9 @@ func photoServer(t *testing.T, s *Server, f *fakeAPI) *photoFixture {
 				endpoint = base + "/upload?signature=private-upload-signature"
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]string{"upload_url": endpoint}})
+		case "/method/photos.getMessagesUploadServer":
+			p.communityServers++
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]string{"upload_url": base + "/upload"}})
 		case "/upload":
 			p.uploads++
 			if p.uploadStatus != 0 {
@@ -94,10 +102,18 @@ func photoServer(t *testing.T, s *Server, f *fakeAPI) *photoFixture {
 				t.Error("uploaded bytes differ from Telegram photo")
 			}
 			io.WriteString(w, `{"photo":"[{\"photo\":\"server-data\"}]","server":10,"hash":"private-save-hash"}`)
-		case "/method/photos.saveWallPhoto":
+		case "/method/photos.saveWallPhoto", "/method/photos.saveMessagesPhoto":
 			p.saves++
 			_ = r.ParseForm()
-			if r.Form.Get("group_id") != "99" || r.Form.Get("server") != "10" || r.Form.Get("hash") != "private-save-hash" || r.Form.Get("photo") == "" {
+			if r.URL.Path == "/method/photos.saveMessagesPhoto" {
+				p.communitySaves++
+				if r.Form.Has("group_id") {
+					t.Error("group_id sent to saveMessagesPhoto")
+				}
+			} else if r.Form.Get("group_id") != "99" {
+				t.Error("wrong save group")
+			}
+			if r.Form.Get("server") != "10" || r.Form.Get("hash") != "private-save-hash" || r.Form.Get("photo") == "" {
 				t.Error("wrong save parameters")
 			}
 			if p.saveError != 0 {
@@ -296,5 +312,34 @@ func TestUploadURLValidation(t *testing.T) {
 		if !api.trustedUploadURL(endpoint) {
 			t.Fatal("VK upload URL rejected")
 		}
+	}
+}
+
+func TestCommunityPhotoUploadFallback(t *testing.T) {
+	s, f := fixture(t, false)
+	seed(t, s)
+	media := photoServer(t, s, f)
+	media.wallServerError = 27
+	accept(t, s, 1, photoMessage(1, "Community caption", "large-file"), false)
+	work(t, s)
+	media.mu.Lock()
+	servers, saves := media.communityServers, media.communitySaves
+	media.mu.Unlock()
+	if servers != 1 || saves != 1 || f.posts != 1 || f.last.Get("attachments") != "photo-99_55" || f.last.Get("message") != "Community caption" {
+		t.Fatal("community photo was not attached to wall post")
+	}
+}
+func TestPhotoScopeDenialDoesNotSelectDifferentUpload(t *testing.T) {
+	s, f := fixture(t, false)
+	seed(t, s)
+	media := photoServer(t, s, f)
+	media.wallServerError = 7
+	accept(t, s, 1, photoMessage(1, "Caption", "large-file"), false)
+	work(t, s)
+	media.mu.Lock()
+	servers := media.communityServers
+	media.mu.Unlock()
+	if servers != 0 || f.posts != 0 || count(t, s, "SELECT count(*) FROM poster_posts WHERE status='failed'") != 1 {
+		t.Fatal("scope denial was not preserved")
 	}
 }

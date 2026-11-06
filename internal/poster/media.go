@@ -127,8 +127,18 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 	var server struct {
 		URL string `json:"upload_url"`
 	}
+	saveMethod := "photos.saveWallPhoto"
 	if e = a.VK(ctx, "photos.getWallUploadServer", token, url.Values{"group_id": {intString(group)}}, &server); e != nil {
-		return "", fmt.Errorf("VK photos.getWallUploadServer (check photos permission): %w", e)
+		apiError, ok := e.(*APIError)
+		if !ok || apiError.Code != 27 {
+			return "", fmt.Errorf("VK photos.getWallUploadServer (check photos permission): %w", e)
+		}
+		// VK community keys cannot use wall upload endpoints. The supported
+		// community photo upload creates an attachment without sending a message.
+		if e = a.VK(ctx, "photos.getMessagesUploadServer", token, url.Values{}, &server); e != nil {
+			return "", fmt.Errorf("VK photos.getMessagesUploadServer (check photos permission): %w", e)
+		}
+		saveMethod = "photos.saveMessagesPhoto"
 	}
 	if !a.trustedUploadURL(server.URL) {
 		return "", &VerificationError{"VK returned an untrusted photo upload URL"}
@@ -159,8 +169,12 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 		Owner     int64  `json:"owner_id"`
 		AccessKey string `json:"access_key"`
 	}
-	if e = a.VK(ctx, "photos.saveWallPhoto", token, url.Values{"group_id": {intString(group)}, "photo": {uploaded.Photo}, "server": {intString(uploaded.Server)}, "hash": {uploaded.Hash}}, &saved); e != nil {
-		return "", fmt.Errorf("VK photos.saveWallPhoto: %w", e)
+	saveParams := url.Values{"photo": {uploaded.Photo}, "server": {intString(uploaded.Server)}, "hash": {uploaded.Hash}}
+	if saveMethod == "photos.saveWallPhoto" {
+		saveParams.Set("group_id", intString(group))
+	}
+	if e = a.VK(ctx, saveMethod, token, saveParams, &saved); e != nil {
+		return "", fmt.Errorf("VK %s: %w", saveMethod, e)
 	}
 	if len(saved) != 1 || saved[0].ID <= 0 || saved[0].Owner == 0 {
 		return "", &APIError{"vk_photo_upload", 0, true}
