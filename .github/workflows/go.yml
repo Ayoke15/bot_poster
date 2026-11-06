@@ -48,10 +48,28 @@ jobs:
           cache: true
       - run: go mod verify
       - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - name: Run unit and PostgreSQL integration tests
+        shell: bash
+        run: go test -race -count=1 ./... 2>&1 | tee "$RUNNER_TEMP/unit-test.log"
         env:
           TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/poster_test
       - run: go build ./cmd/bot
+      - name: Annotate unit test failure
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY_UNIT'
+          import os, pathlib, re
+          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'unit-test.log'
+          if log.exists():
+              for line in log.read_text(errors='replace').splitlines():
+                  match = re.match(r'\s*([A-Za-z0-9_]+_test\.go):(\d+):\s*(.*)', line)
+                  if match:
+                      message = match[3].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f'::error file=internal/poster/{match[1]},line={match[2]},title=Unit test failure::{message}')
+                  if 'WARNING: DATA RACE' in line:
+                      print('::error title=Race detector::Data race detected in test run; inspect the adjacent test failure annotation.')
+          PY_UNIT
 
   live-integration:
     name: Live Telegram to VK
