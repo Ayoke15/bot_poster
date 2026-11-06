@@ -58,6 +58,10 @@ func (a *API) Telegram(ctx context.Context, method string, payload any, result a
 	if e != nil {
 		return e
 	}
+	return parseTelegramResponse(data, result)
+}
+func parseTelegramResponse(data []byte, result any) error {
+	var e error
 	var r struct {
 		OK     bool            `json:"ok"`
 		Code   int             `json:"error_code"`

@@ -27,8 +27,9 @@ type Message struct {
 	From *struct {
 		ID int64 `json:"id"`
 	} `json:"from"`
-	Text    string `json:"text"`
-	Caption string `json:"caption"`
+	Text    string      `json:"text"`
+	Caption string      `json:"caption"`
+	Photo   []PhotoSize `json:"photo"`
 }
 type Update struct {
 	ID      *int64   `json:"update_id"`
@@ -143,15 +144,16 @@ func (s *Server) accept(ctx context.Context, u Update) error {
 		if body == "" {
 			body = m.Caption
 		}
-		if !edited && body == "" {
+		photo := largestPhoto(m.Photo)
+		if !edited && body == "" && photo == "" {
 			return tx.Commit(ctx)
 		}
 		if edited {
 			// Never create a new publication for an edit of a pre-connection/unseen post.
-			_, e = tx.Exec(ctx, `UPDATE poster_posts SET body=$3,desired_version=$4,
+			_, e = tx.Exec(ctx, `UPDATE poster_posts SET body=$3,desired_version=$4,photo_file_id=$5,
       status=CASE WHEN status='processing' THEN status ELSE 'pending' END,
       attempts=CASE WHEN status='processing' THEN attempts ELSE 0 END,next_attempt_at=now()
-      WHERE chat_id=$1 AND message_id=$2 AND desired_version<$4 AND status NOT IN ('cancelled','failed')`, m.Chat.ID, m.ID, body, *u.ID)
+      WHERE chat_id=$1 AND message_id=$2 AND desired_version<$4 AND status NOT IN ('cancelled','failed')`, m.Chat.ID, m.ID, body, *u.ID, photo)
 		} else {
 			var owner, group, version int64
 			e = tx.QueryRow(ctx, `SELECT c.owner_id,u.group_id,u.token_version FROM poster_channels c JOIN poster_users u ON u.user_id=c.owner_id
@@ -163,8 +165,8 @@ func (s *Server) accept(ctx context.Context, u Update) error {
 				return e
 			}
 			h := sha256.Sum256([]byte(intString(s.BotID) + ":" + intString(m.Chat.ID) + ":" + intString(m.ID)))
-			_, e = tx.Exec(ctx, `INSERT INTO poster_posts(chat_id,message_id,owner_id,group_id,token_version,body,desired_version,guid)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(chat_id,message_id) DO NOTHING`, m.Chat.ID, m.ID, owner, group, version, body, *u.ID, hex.EncodeToString(h[:16]))
+			_, e = tx.Exec(ctx, `INSERT INTO poster_posts(chat_id,message_id,owner_id,group_id,token_version,body,desired_version,guid,photo_file_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(chat_id,message_id) DO NOTHING`, m.Chat.ID, m.ID, owner, group, version, body, *u.ID, hex.EncodeToString(h[:16]), photo)
 		}
 		if e != nil {
 			return e

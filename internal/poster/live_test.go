@@ -25,7 +25,10 @@ import (
 // This opt-in test creates real posts and leaves them for manual inspection. It never registers or deletes
 // webhooks or polls updates. A synthetic channel_post wraps the real sendMessage
 // response; inbound Telegram event delivery is deliberately outside this test.
-func TestLiveTelegramToVK(t *testing.T) {
+func TestLiveTelegramToVK(t *testing.T)      { runLivePost(t, false) }
+func TestLiveTelegramPhotoToVK(t *testing.T) { runLivePost(t, true) }
+func runLivePost(t *testing.T, withPhoto bool) {
+	t.Helper()
 	if os.Getenv("RUN_LIVE_INTEGRATION") != "true" {
 		t.Skip("live integration is opt-in")
 	}
@@ -131,8 +134,16 @@ func TestLiveTelegramToVK(t *testing.T) {
 		t.Fatal("cannot seed verified test channel")
 	}
 	var sent Message
-	if e = api.Telegram(ctx, "sendMessage", map[string]any{"chat_id": channel, "text": marker}, &sent); e != nil {
+	if withPhoto {
+		e = api.SendPhoto(ctx, channel, marker, testPhotoPNG(t), &sent)
+	} else {
+		e = api.Telegram(ctx, "sendMessage", map[string]any{"chat_id": channel, "text": marker}, &sent)
+	}
+	if e != nil {
 		t.Fatal(e)
+	}
+	if withPhoto && (largestPhoto(sent.Photo) == "" || sent.Caption != marker) {
+		t.Fatal("Telegram did not return a photo and caption")
 	}
 	if sent.ID <= 0 || sent.Chat.ID != channel || sent.Chat.Type != "channel" {
 		t.Fatal("Telegram did not return a message from the test channel")
@@ -189,6 +200,9 @@ func TestLiveTelegramToVK(t *testing.T) {
 	}
 	if postID == nil {
 		t.Fatal("timed out waiting for VK publication")
+	}
+	if withPhoto && count(t, s, "SELECT count(*) FROM poster_posts WHERE chat_id=$1 AND message_id=$2 AND photo_file_id<>'' AND uploaded_photo_file_id=photo_file_id AND vk_attachment<>''", channel, sent.ID) != 1 {
+		t.Fatal("photo attachment was not saved before VK publication")
 	}
 	if *postID <= 0 {
 		t.Fatal("VK did not return a positive post ID")

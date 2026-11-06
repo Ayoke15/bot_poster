@@ -46,3 +46,7 @@ CREATE TABLE IF NOT EXISTS poster_notifications (
  last_error TEXT
 );
 CREATE TABLE IF NOT EXISTS poster_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
+
+ALTER TABLE poster_posts ADD COLUMN IF NOT EXISTS photo_file_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE poster_posts ADD COLUMN IF NOT EXISTS vk_attachment TEXT NOT NULL DEFAULT '';
+ALTER TABLE poster_posts ADD COLUMN IF NOT EXISTS uploaded_photo_file_id TEXT NOT NULL DEFAULT '';

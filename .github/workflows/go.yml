@@ -62,7 +62,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     concurrency:
       group: live-telegram-vk-test-bot
       cancel-in-progress: false
@@ -84,10 +84,10 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
-      - name: Create Telegram and VK posts for manual inspection
+      - name: Create text and photo posts in Telegram and VK
         shell: bash
         run: |
-          go test -race -tags=live -run '^TestLiveTelegramToVK$' -count=1 -timeout=5m -v ./internal/poster 2>&1 | tee "$RUNNER_TEMP/live-test.log"
+          go test -race -tags=live -run '^TestLiveTelegram(ToVK|PhotoToVK)$' -count=1 -timeout=7m -v ./internal/poster 2>&1 | tee "$RUNNER_TEMP/live-test.log"
         env:
           RUN_LIVE_INTEGRATION: 'true'
           TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/poster_live_test

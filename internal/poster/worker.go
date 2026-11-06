@@ -13,6 +13,7 @@ import (
 type job struct {
 	Chat, Message, Owner, Group, TokenVersion, Version int64
 	Body, Guid, Token                                  string
+	Photo, Attachment, UploadedPhoto                   string
 	PostID                                             *int64
 	Attempts                                           int
 	First                                              time.Time
@@ -78,7 +79,7 @@ func (s *Server) processJob(ctx context.Context, conn *pgxpool.Conn) (bool, erro
 	e := conn.QueryRow(ctx, `UPDATE poster_posts SET status='processing',attempts=attempts+1,
  first_attempt_at=coalesce(first_attempt_at,now()),next_attempt_at=now()+interval '60 seconds'
  WHERE (chat_id,message_id)=(SELECT chat_id,message_id FROM poster_posts WHERE status IN ('pending','processing') AND next_attempt_at<=now() ORDER BY next_attempt_at,chat_id,message_id LIMIT 1)
- RETURNING chat_id,message_id,owner_id,group_id,token_version,body,desired_version,guid,vk_post_id,attempts,first_attempt_at`).Scan(&j.Chat, &j.Message, &j.Owner, &j.Group, &j.TokenVersion, &j.Body, &j.Version, &j.Guid, &j.PostID, &j.Attempts, &j.First)
+ RETURNING chat_id,message_id,owner_id,group_id,token_version,body,desired_version,guid,vk_post_id,attempts,first_attempt_at,photo_file_id,vk_attachment,uploaded_photo_file_id`).Scan(&j.Chat, &j.Message, &j.Owner, &j.Group, &j.TokenVersion, &j.Body, &j.Version, &j.Guid, &j.PostID, &j.Attempts, &j.First, &j.Photo, &j.Attachment, &j.UploadedPhoto)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -97,7 +98,7 @@ func (s *Server) processJob(ctx context.Context, conn *pgxpool.Conn) (bool, erro
 	if j.Attempts > 6 || (j.PostID == nil && time.Since(j.First) > 45*time.Minute) {
 		return true, s.failJob(ctx, conn, j, errors.New("retry window expired; verify VK manually before reposting"), false)
 	}
-	if j.Body == "" {
+	if j.Body == "" && j.Photo == "" {
 		return true, s.failJob(ctx, conn, j, errors.New("empty edited text; VK post left unchanged"), false)
 	}
 	token, e := s.Store.Cipher.Decrypt(j.Owner, j.Token)
@@ -107,7 +108,22 @@ func (s *Server) processJob(ctx context.Context, conn *pgxpool.Conn) (bool, erro
 	if e = s.checkAdmin(ctx, j.Chat, j.Owner); e != nil {
 		return true, s.failJob(ctx, conn, j, errors.New("channel administrator verification failed"), temporary(e))
 	}
-	values := url.Values{"owner_id": {intString(-j.Group)}, "message": {j.Body}}
+	attachment := ""
+	if j.Photo != "" {
+		if j.UploadedPhoto == j.Photo && j.Attachment != "" {
+			attachment = j.Attachment
+		} else {
+			attachment, e = s.API.UploadWallPhoto(ctx, token, j.Group, j.Photo)
+			if e != nil {
+				return true, s.failJob(ctx, conn, j, e, temporary(e))
+			}
+			// Cache the attachment before publication. Caption edits and retries reuse it.
+			if _, e = conn.Exec(ctx, "UPDATE poster_posts SET vk_attachment=$3,uploaded_photo_file_id=$4 WHERE chat_id=$1 AND message_id=$2", j.Chat, j.Message, attachment, j.Photo); e != nil {
+				return true, e
+			}
+		}
+	}
+	values := url.Values{"owner_id": {intString(-j.Group)}, "message": {j.Body}, "attachments": {attachment}}
 	var postID int64
 	if j.PostID == nil {
 		values.Set("from_group", "1")
