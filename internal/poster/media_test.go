@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"image"
 	"image/color"
-	"image/draw"
 	"image/png"
 	"io"
 	"net/http"
@@ -18,8 +17,13 @@ import (
 
 func testPhotoPNG(t *testing.T) []byte {
 	t.Helper()
-	img := image.NewRGBA(image.Rect(0, 0, 256, 256))
-	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{R: 240, G: 160, B: 70, A: 255}}, image.Point{}, draw.Src)
+	img := image.NewRGBA(image.Rect(0, 0, 640, 480))
+	// A representative textured image, not an almost-empty single-color file.
+	for y := 0; y < 480; y++ {
+		for x := 0; x < 640; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(x * 255 / 639), G: uint8(y * 255 / 479), B: uint8((x*31 + y*17) % 256), A: 255})
+		}
+	}
 	var b bytes.Buffer
 	if e := png.Encode(&b, img); e != nil {
 		t.Fatal(e)
