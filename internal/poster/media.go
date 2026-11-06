@@ -3,6 +3,7 @@ package poster
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -166,6 +167,14 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 		protocols := new(http.Protocols)
 		protocols.SetHTTP1(true)
 		cloned.Protocols = protocols
+		cloned.ForceAttemptHTTP2 = false
+		cloned.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		if cloned.TLSClientConfig == nil {
+			cloned.TLSClientConfig = &tls.Config{}
+		} else {
+			cloned.TLSClientConfig = cloned.TLSClientConfig.Clone()
+		}
+		cloned.TLSClientConfig.NextProtos = []string{"http/1.1"}
 		client.Transport = cloned
 		defer cloned.CloseIdleConnections()
 	}
