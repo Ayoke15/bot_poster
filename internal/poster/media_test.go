@@ -28,6 +28,7 @@ func testPhotoPNG(t *testing.T) []byte {
 }
 
 type photoFixture struct {
+	photosAllowed                                     bool
 	wallServerError, communityServers, communitySaves int
 	mu                                                sync.Mutex
 	downloads, uploads, saves                         int
@@ -46,12 +47,18 @@ func (p *photoFixture) counts() (int, int, int) {
 }
 func photoServer(t *testing.T, s *Server, f *fakeAPI) *photoFixture {
 	t.Helper()
-	p := &photoFixture{path: "photos/test.png", data: testPhotoPNG(t)}
+	p := &photoFixture{photosAllowed: true, path: "photos/test.png", data: testPhotoPNG(t)}
 	var base string
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		switch r.URL.Path {
+		case "/method/groups.getTokenPermissions":
+			value := 0
+			if p.photosAllowed {
+				value = 1
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": map[string]any{"permissions": []map[string]any{{"name": "photos", "setting": value}}}})
 		case "/bot10:test-token/getFile":
 			var payload struct {
 				ID string `json:"file_id"`
@@ -353,5 +360,37 @@ func TestPhotoScopeDenialDoesNotSelectDifferentUpload(t *testing.T) {
 	media.mu.Unlock()
 	if servers != 0 || f.posts != 0 || count(t, s, "SELECT count(*) FROM poster_posts WHERE status='failed'") != 1 {
 		t.Fatal("scope denial was not preserved")
+	}
+}
+
+func TestPhotoPermissionDeniedBeforeDownload(t *testing.T) {
+	s, f := fixture(t, false)
+	seed(t, s)
+	media := photoServer(t, s, f)
+	media.photosAllowed = false
+	accept(t, s, 1, photoMessage(1, "Caption", "large-file"), false)
+	work(t, s)
+	downloads, uploads, _ := media.counts()
+	if downloads != 0 || uploads != 0 || f.posts != 0 || count(t, s, "SELECT count(*) FROM poster_posts WHERE status='failed' AND last_error LIKE '%photos%'") != 1 {
+		t.Fatal("missing photos permission did not stop delivery with clear error")
+	}
+}
+func TestUserPhotoPermission(t *testing.T) {
+	for _, mask := range []int{8192, 8196} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/groups.getTokenPermissions" {
+				io.WriteString(w, `{"error":{"error_code":27}}`)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"response": mask})
+		}))
+		api := NewAPI(Config{})
+		api.VKURL = server.URL
+		err := api.VerifyPhotoPermission(context.Background(), "user-secret")
+		if (err == nil) != (mask&4 != 0) {
+			server.Close()
+			t.Fatal("user photos permission was not checked")
+		}
+		server.Close()
 	}
 }

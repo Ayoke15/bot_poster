@@ -124,7 +124,43 @@ func (a *API) trustedUploadURL(endpoint string) bool {
 	return false
 }
 
+func (a *API) VerifyPhotoPermission(ctx context.Context, token string) error {
+	var rights struct {
+		Mask        int64 `json:"mask"`
+		Permissions []struct {
+			Name    string `json:"name"`
+			Setting int    `json:"setting"`
+		} `json:"permissions"`
+	}
+	e := a.VK(ctx, "groups.getTokenPermissions", token, url.Values{}, &rights)
+	allowed := false
+	if e == nil {
+		allowed = rights.Mask&4 != 0
+		for _, p := range rights.Permissions {
+			if p.Name == "photos" && p.Setting > 0 {
+				allowed = true
+			}
+		}
+	} else if apiError, ok := e.(*APIError); ok && apiError.Code == 27 {
+		var mask int64
+		if e = a.VK(ctx, "account.getAppPermissions", token, url.Values{}, &mask); e != nil {
+			return fmt.Errorf("VK photo permissions: %w", e)
+		}
+		allowed = mask&4 != 0
+	} else {
+		return fmt.Errorf("VK photo permissions: %w", e)
+	}
+	if !allowed {
+		return &VerificationError{"У ключа VK нет разрешения photos (Фотографии). Добавьте его вместе с wall и обновите ключ подключения; для CI обновите VK_TEST_COMMUNITY_TOKEN или VK_TEST_USER_TOKEN."}
+	}
+	return nil
+}
+
 func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fileID string) (string, error) {
+	if e := a.VerifyPhotoPermission(ctx, token); e != nil {
+		return "", e
+	}
+
 	data, filename, e := a.downloadPhoto(ctx, fileID)
 	if e != nil {
 		return "", e
