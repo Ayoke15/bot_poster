@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,9 +27,15 @@ import (
 // This opt-in test creates real posts and leaves them for manual inspection. It never registers or deletes
 // webhooks or polls updates. A synthetic channel_post wraps the real sendMessage
 // response; inbound Telegram event delivery is deliberately outside this test.
-func TestLiveTelegramToVK(t *testing.T) {
+func TestLiveTelegramToVK(t *testing.T)      { runLivePost(t, false) }
+func TestLiveTelegramPhotoToVK(t *testing.T) { runLivePost(t, true) }
+func runLivePost(t *testing.T, withPhoto bool) {
+	t.Helper()
 	if os.Getenv("RUN_LIVE_INTEGRATION") != "true" {
 		t.Skip("live integration is opt-in")
+	}
+	if withPhoto && os.Getenv("VK_TEST_WEB_SESSION_FILE") == "" {
+		t.Skip("web photo publication requires local VK_TEST_WEB_SESSION_FILE and owner login; CI does not receive personal browser sessions")
 	}
 	required := func(name string) string {
 		t.Helper()
@@ -47,7 +55,7 @@ func TestLiveTelegramToVK(t *testing.T) {
 	}
 	botToken := required("TG_TEST_BOT_TOKEN")
 	vkToken := os.Getenv("VK_TEST_USER_TOKEN")
-	if vkToken == "" {
+	if !withPhoto && vkToken == "" {
 		vkToken = required("VK_TEST_COMMUNITY_TOKEN")
 	} // Both verified community and user tokens are supported.
 	channel, owner, group := number("TG_TEST_CHANNEL_ID"), number("TG_TEST_OWNER_ID"), number("VK_TEST_GROUP_ID")
@@ -117,7 +125,38 @@ func TestLiveTelegramToVK(t *testing.T) {
 	if e = s.checkAdmin(ctx, channel, owner); e != nil {
 		t.Fatal("owner and test bot must be channel administrators")
 	}
-	if e = api.VerifyGroup(ctx, vkToken, group); e != nil {
+	if withPhoto {
+		data, err := os.ReadFile(required("VK_TEST_WEB_SESSION_FILE"))
+		if err != nil || len(data) > 256*1024 {
+			t.Fatal("cannot read encrypted web session")
+		}
+		key, err := base64.StdEncoding.DecodeString(required("TOKEN_ENCRYPTION_KEY"))
+		if err != nil || len(key) != 32 {
+			t.Fatal("invalid session encryption key")
+		}
+		cipher, err := NewTokenCipher(key)
+		if err != nil {
+			t.Fatal("invalid encryption key")
+		}
+		vkToken, err = cipher.Decrypt(owner, strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Fatal("cannot decrypt web session for Telegram owner")
+		}
+		web, err := NewWebAPI(api, vkToken)
+		if err != nil {
+			t.Fatal("invalid web session")
+		}
+		if web.Web.Session.GroupID != group {
+			t.Fatal("web session group mismatch")
+		}
+		e = web.VerifyWebGroup(ctx, group)
+		if e == nil {
+			vkToken, e = web.Web.Credential()
+		}
+	} else {
+		e = api.VerifyGroup(ctx, vkToken, group)
+	}
+	if e != nil {
 		t.Fatalf("VK token verification failed: %v. Check the configured VK_TEST_USER_TOKEN or VK_TEST_COMMUNITY_TOKEN and its wall permission. No test posts have been created.", e)
 	}
 	encrypted, e := store.Cipher.Encrypt(owner, vkToken)
@@ -131,8 +170,16 @@ func TestLiveTelegramToVK(t *testing.T) {
 		t.Fatal("cannot seed verified test channel")
 	}
 	var sent Message
-	if e = api.Telegram(ctx, "sendMessage", map[string]any{"chat_id": channel, "text": marker}, &sent); e != nil {
+	if withPhoto {
+		e = api.SendPhoto(ctx, channel, marker, testPhotoPNG(t), &sent)
+	} else {
+		e = api.Telegram(ctx, "sendMessage", map[string]any{"chat_id": channel, "text": marker}, &sent)
+	}
+	if e != nil {
 		t.Fatal(e)
+	}
+	if withPhoto && (largestPhoto(sent.Photo) == "" || sent.Caption != marker) {
+		t.Fatal("Telegram did not return a photo and caption")
 	}
 	if sent.ID <= 0 || sent.Chat.ID != channel || sent.Chat.Type != "channel" {
 		t.Fatal("Telegram did not return a message from the test channel")
@@ -170,16 +217,20 @@ func TestLiveTelegramToVK(t *testing.T) {
 		}
 	}
 	var postID *int64
+	var lastCause string
+	completed := false
 	for ctx.Err() == nil {
-		var state string
-		e = store.Pool.QueryRow(ctx, "SELECT status,vk_post_id FROM poster_posts WHERE chat_id=$1 AND message_id=$2", channel, sent.ID).Scan(&state, &postID)
+		var state, cause string
+		e = store.Pool.QueryRow(ctx, "SELECT status,vk_post_id,coalesce(last_error,'') FROM poster_posts WHERE chat_id=$1 AND message_id=$2", channel, sent.ID).Scan(&state, &postID, &cause)
 		if e != nil {
-			t.Fatal("cannot read delivery status")
+			t.Fatalf("cannot read delivery status; last safe delivery error: %s", lastCause)
 		}
+		lastCause = cause
 		if state == "failed" || state == "cancelled" {
-			t.Fatal("live VK delivery failed; inspect test community permissions and limits")
+			t.Fatalf("live VK delivery %s: %s", state, cause)
 		}
 		if state == "done" && postID != nil {
+			completed = true
 			break
 		}
 		select {
@@ -187,12 +238,19 @@ func TestLiveTelegramToVK(t *testing.T) {
 		case <-time.After(time.Second):
 		}
 	}
-	if postID == nil {
-		t.Fatal("timed out waiting for VK publication")
+	if !completed || postID == nil {
+		t.Fatalf("timed out waiting for VK publication; last safe delivery error: %s", lastCause)
+	}
+	if withPhoto && count(t, s, "SELECT count(*) FROM poster_posts WHERE chat_id=$1 AND message_id=$2 AND photo_file_id<>'' AND uploaded_photo_file_id=photo_file_id AND vk_attachment<>''", channel, sent.ID) != 1 {
+		t.Fatal("photo attachment was not saved before VK publication")
 	}
 	if *postID <= 0 {
 		t.Fatal("VK did not return a positive post ID")
 	}
 	t.Logf("Created Telegram message %d and VK post %d_%d; both left for manual inspection. VK URL: https://vk.ru/wall%d_%d", sent.ID, -group, *postID, -group, *postID)
-	t.Log("Inbound Telegram delivery and VK content/read/delete APIs are outside this creation-only test")
+	if withPhoto {
+		t.Log("VK photo attachment presence verified with wall.getById; caption content and inbound Telegram delivery not checked")
+	} else {
+		t.Log("Inbound Telegram delivery and VK content/read APIs are outside the text creation test")
+	}
 }

@@ -57,7 +57,7 @@ func parseGroup(text string) (int64, error) {
 
 const bindingWarning = "Важно: у одного Telegram-пользователя может быть только одно сообщество VK. Подключение новой группы заменит прежнюю; ожидающие публикации будут отменены. Уже отправляемый пост может успеть опубликоваться."
 
-const helpText = "Я переношу текст и подписи постов из Telegram в VK.\n1. Добавьте бота администратором канала.\n2. /connect_channel -100… — подключить канал (проверю права ваши и бота). ID можно взять у доверенного Telegram-клиента; пересылка поста не подтверждает владение.\n3. 🔗 Подключить VK — ссылка vk.com/club123, затем ключ сообщества с правом wall (или пользовательский ключ редактора/администратора группы). Или /set_vk <id> <токен>. Токен отправляйте только сюда.\n4. /enable — включить.\n/status — состояние и последние ошибки; /disable; /disconnect_channel <id>; /clear_vk.\nРедактирование обновляет существующий пост VK. Старые и неизвестные посты не публикуются.\n\n" + bindingWarning
+const helpText = "Я переношу текст и фотографии с подписями из Telegram в VK.\n1. Добавьте бота администратором канала.\n2. /connect_channel -100… — подключить канал (проверю права ваши и бота). ID можно взять у доверенного Telegram-клиента; пересылка поста не подтверждает владение.\n3. 🔗 Подключить VK — ссылка vk.com/club123, затем ключ сообщества с правом wall (или пользовательский ключ редактора/администратора группы). Или /set_vk <id> <токен>. Токен отправляйте только сюда. Для фотографий владелец сервера подключает браузерную сессию VK; cookies в чат не отправляйте.\n4. /enable — включить.\n/status — состояние и последние ошибки; /disable; /disconnect_channel <id>; /clear_vk.\nРедактирование обновляет существующий пост VK. Старые и неизвестные посты не публикуются.\n\n" + bindingWarning
 
 var buttonCommands = map[string]string{"🔗 Подключить VK": "/connect_vk", "🔌 Как подключить": "/token_help", "📝 Формат /set_vk": "/format", "📊 Статус": "/status", "▶️ Включить": "/enable", "⏹ Выключить": "/disable", "🗑 Сбросить VK": "/clear_vk", "🏠 Главная": "/start"}
 
@@ -169,21 +169,21 @@ func (s *Server) command(ctx context.Context, tx pgx.Tx, m Message) error {
 		}
 		return reply("Автопостинг выключен. Ожидающие задания отменены; /enable действует на новые посты.")
 	case "/clear_vk":
-		if _, e := tx.Exec(ctx, "UPDATE poster_users SET token_cipher=NULL,group_id=NULL,enabled=FALSE,token_version=token_version+1,connect_step=0,pending_group=NULL WHERE user_id=$1", id); e != nil {
+		if _, e := tx.Exec(ctx, "UPDATE poster_users SET token_cipher=NULL,group_id=NULL,enabled=FALSE,web_paused=FALSE,token_version=token_version+1,connect_step=0,pending_group=NULL WHERE user_id=$1", id); e != nil {
 			return e
 		}
 		if _, e := tx.Exec(ctx, "UPDATE poster_posts SET status='cancelled',last_error='VK disconnected' WHERE owner_id=$1 AND status IN ('pending','processing')", id); e != nil {
 			return e
 		}
-		return reply("Токен VK удалён. Автопостинг выключен.")
+		return reply("Реквизиты VK удалены. Автопостинг выключен. Если подключали браузерную сессию, её можно завершить в настройках безопасности VK.")
 	case "/status":
 		var group *int64
-		var enabled, hasToken bool
+		var enabled, hasToken, paused bool
 		var channels, pendingJobs, failed int
-		if e := tx.QueryRow(ctx, `SELECT group_id,enabled,token_cipher IS NOT NULL,
+		if e := tx.QueryRow(ctx, `SELECT group_id,enabled,token_cipher IS NOT NULL,web_paused,
    (SELECT count(*) FROM poster_channels WHERE owner_id=$1),
    (SELECT count(*) FROM poster_posts WHERE owner_id=$1 AND status IN ('pending','processing')),
-   (SELECT count(*) FROM poster_posts WHERE owner_id=$1 AND status='failed') FROM poster_users WHERE user_id=$1`, id).Scan(&group, &enabled, &hasToken, &channels, &pendingJobs, &failed); e != nil {
+   (SELECT count(*) FROM poster_posts WHERE owner_id=$1 AND status='failed') FROM poster_users WHERE user_id=$1`, id).Scan(&group, &enabled, &hasToken, &paused, &channels, &pendingJobs, &failed); e != nil {
 			return e
 		}
 		g := "не подключена"
@@ -191,6 +191,9 @@ func (s *Server) command(ctx context.Context, tx pgx.Tx, m Message) error {
 			g = intString(*group)
 		}
 		status := fmt.Sprintf("VK: %s; токен сохранён: %t; включено: %t\nКаналов: %d; в очереди: %d; ошибок: %d", g, hasToken, enabled, channels, pendingJobs, failed)
+		if paused {
+			status += "\nВеб-сессия VK: требуется повторный вход. Очередь приостановлена."
+		}
 		rows, e := tx.Query(ctx, "SELECT chat_id,message_id,last_error FROM poster_posts WHERE owner_id=$1 AND last_error IS NOT NULL ORDER BY desired_version DESC LIMIT 3", id)
 		if e != nil {
 			return e
@@ -260,7 +263,7 @@ func (s *Server) saveToken(ctx context.Context, tx pgx.Tx, m Message, group int6
 		VALUES($1,$2,$3,1)
 		ON CONFLICT(user_id) DO UPDATE SET
 		group_id=excluded.group_id,token_cipher=excluded.token_cipher,
-		token_version=poster_users.token_version+1,connect_step=0,pending_group=NULL`, id, group, cipher); e != nil {
+		token_version=poster_users.token_version+1,web_paused=FALSE,connect_step=0,pending_group=NULL`, id, group, cipher); e != nil {
 		return e
 	}
 	cancelled, e := tx.Exec(ctx, "UPDATE poster_posts SET status='cancelled',last_error='VK credentials changed' WHERE owner_id=$1 AND status IN ('pending','processing')", id)

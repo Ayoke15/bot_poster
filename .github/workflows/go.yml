@@ -48,10 +48,28 @@ jobs:
           cache: true
       - run: go mod verify
       - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - name: Run unit and PostgreSQL integration tests
+        shell: bash
+        run: go test -race -count=1 ./... 2>&1 | tee "$RUNNER_TEMP/unit-test.log"
         env:
           TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/poster_test
-      - run: go build ./cmd/bot
+      - run: go build ./cmd/...
+      - name: Annotate unit test failure
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY_UNIT'
+          import os, pathlib, re
+          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'unit-test.log'
+          if log.exists():
+              for line in log.read_text(errors='replace').splitlines():
+                  match = re.match(r'\s*([A-Za-z0-9_]+_test\.go):(\d+):\s*(.*)', line)
+                  if match:
+                      message = match[3].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f'::error file=internal/poster/{match[1]},line={match[2]},title=Unit test failure::{message}')
+                  if 'WARNING: DATA RACE' in line:
+                      print('::error title=Race detector::Data race detected in test run; inspect the adjacent test failure annotation.')
+          PY_UNIT
 
   live-integration:
     name: Live Telegram to VK
@@ -62,7 +80,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     concurrency:
       group: live-telegram-vk-test-bot
       cancel-in-progress: false
@@ -84,10 +102,11 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
-      - name: Create Telegram and VK posts for manual inspection
+      - name: Create text post (browser photo test requires local login)
         shell: bash
         run: |
-          go test -race -tags=live -run '^TestLiveTelegramToVK$' -count=1 -timeout=5m -v ./internal/poster 2>&1 | tee "$RUNNER_TEMP/live-test.log"
+          echo 'Text publication runs live. Browser-session photo publication requires a local VK_TEST_WEB_SESSION_FILE and is skipped in CI; green CI does not verify a real photo.' >> "$GITHUB_STEP_SUMMARY"
+          go test -race -tags=live -run '^TestLiveTelegram(ToVK|PhotoToVK)$' -count=1 -timeout=7m -v ./internal/poster 2>&1 | tee "$RUNNER_TEMP/live-test.log"
         env:
           RUN_LIVE_INTEGRATION: 'true'
           TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/poster_live_test

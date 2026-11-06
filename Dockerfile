@@ -9,7 +9,9 @@ RUN --mount=type=secret,id=proxy_ca \
 COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -ldflags='-s -w' -o /bot ./cmd/bot
+RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -ldflags='-s -w' -o /vk-session ./cmd/vk-session
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /bot /app/bot
+COPY --from=build /vk-session /app/vk-session
 EXPOSE 8000
 ENTRYPOINT ["/app/bot"]

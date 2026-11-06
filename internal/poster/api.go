@@ -20,6 +20,7 @@ type APIError struct {
 func (e *APIError) Error() string { return fmt.Sprintf("%s API failure (code %d)", e.Service, e.Code) }
 
 type API struct {
+	Web                                     *WebClient
 	HTTP                                    *http.Client
 	TelegramURL, VKURL, BotToken, VKVersion string
 }
@@ -45,7 +46,18 @@ func (a *API) request(ctx context.Context, service, endpoint string, body io.Rea
 		return nil, &APIError{service, 0, true}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &APIError{service, resp.StatusCode, resp.StatusCode == 429 || resp.StatusCode >= 500}
+		failure := &APIError{service, resp.StatusCode, resp.StatusCode == 429 || resp.StatusCode >= 500}
+		if service == "vk_photo_upload" {
+			allowed := resp.Header.Get("Allow")
+			for _, ch := range allowed {
+				if !(ch >= 'A' && ch <= 'Z') && ch != ',' && ch != ' ' {
+					allowed = "unavailable"
+					break
+				}
+			}
+			return nil, fmt.Errorf("HTTP POST rejected (allowed methods: %s): %w", allowed, failure)
+		}
+		return nil, failure
 	}
 	return data, nil
 }
@@ -58,6 +70,10 @@ func (a *API) Telegram(ctx context.Context, method string, payload any, result a
 	if e != nil {
 		return e
 	}
+	return parseTelegramResponse(data, result)
+}
+func parseTelegramResponse(data []byte, result any) error {
+	var e error
 	var r struct {
 		OK     bool            `json:"ok"`
 		Code   int             `json:"error_code"`
@@ -77,6 +93,9 @@ func (a *API) Telegram(ctx context.Context, method string, payload any, result a
 	return nil
 }
 func (a *API) VK(ctx context.Context, method, token string, values url.Values, result any) error {
+	if a.Web != nil {
+		return a.Web.call(ctx, method, values, result)
+	}
 	values.Set("access_token", token)
 	values.Set("v", a.VKVersion)
 	data, e := a.request(ctx, "vk", a.VKURL+"/"+method, bytes.NewBufferString(values.Encode()), "application/x-www-form-urlencoded")

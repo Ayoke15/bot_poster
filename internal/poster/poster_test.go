@@ -541,8 +541,23 @@ func TestWorkerReplicasAndRestart(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("replicas published %d times", n)
 	}
+	// Check only connections actually reusable by this pool. PostgreSQL may
+	// still be reaping closed backends from another isolated fixture/schema.
+	checkCtx, done := context.WithTimeout(context.Background(), 5*time.Second)
+	defer done()
+	probe, e := s.Store.Pool.Acquire(checkCtx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer probe.Release()
+	idle := s.Store.Pool.AcquireAllIdle(checkCtx)
+	pids := []int32{int32(probe.Conn().PgConn().PID())}
+	for _, conn := range idle {
+		pids = append(pids, int32(conn.Conn().PgConn().PID()))
+		defer conn.Release()
+	}
 	var locks int
-	if e := s.Store.Pool.QueryRow(context.Background(), "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND objid=82015002 AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname=current_database())").Scan(&locks); e != nil {
+	if e = probe.QueryRow(checkCtx, "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND objid=82015002 AND pid=ANY($1::int[])", pids).Scan(&locks); e != nil {
 		t.Fatal(e)
 	}
 	if locks != 0 {
