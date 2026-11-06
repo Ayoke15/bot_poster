@@ -82,7 +82,7 @@ func (a *API) downloadPhoto(ctx context.Context, fileID string) ([]byte, string,
 	return nil, "", &VerificationError{"Unsupported Telegram photo format; JPEG or PNG required"}
 }
 
-func multipartPhoto(photo []byte, filename string, fields map[string]string) (*bytes.Buffer, string, error) {
+func multipartPhoto(field string, photo []byte, filename string, fields map[string]string) (*bytes.Buffer, string, error) {
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	for key, value := range fields {
@@ -91,7 +91,7 @@ func multipartPhoto(photo []byte, filename string, fields map[string]string) (*b
 		}
 	}
 	headers := make(textproto.MIMEHeader)
-	headers.Set("Content-Disposition", fmt.Sprintf("form-data; name=%q; filename=%q", "photo", filename))
+	headers.Set("Content-Disposition", fmt.Sprintf("form-data; name=%q; filename=%q", field, filename))
 	headers.Set("Content-Type", http.DetectContentType(photo))
 	part, e := w.CreatePart(headers)
 	if e != nil {
@@ -148,7 +148,7 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 	if !a.trustedUploadURL(server.URL) {
 		return "", &VerificationError{"VK returned an untrusted photo upload URL"}
 	}
-	body, contentType, e := multipartPhoto(data, filename, nil)
+	body, contentType, e := multipartPhoto("file0", data, "file0"+path.Ext(filename), nil)
 	if e != nil {
 		return "", &APIError{"vk_photo_upload", 0, false}
 	}
@@ -216,7 +216,7 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 
 // SendPhoto is used by the live creation test with a generated PNG fixture.
 func (a *API) SendPhoto(ctx context.Context, chat int64, caption string, photo []byte, result any) error {
-	body, contentType, e := multipartPhoto(photo, "test.png", map[string]string{"chat_id": intString(chat), "caption": caption})
+	body, contentType, e := multipartPhoto("photo", photo, "test.png", map[string]string{"chat_id": intString(chat), "caption": caption})
 	if e != nil {
 		return &APIError{"telegram", 0, false}
 	}

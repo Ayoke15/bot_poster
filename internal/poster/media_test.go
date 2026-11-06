@@ -98,7 +98,7 @@ func photoServer(t *testing.T, s *Server, f *fakeAPI) *photoFixture {
 				return
 			}
 			defer r.MultipartForm.RemoveAll()
-			photo, fileHeader, e := r.FormFile("photo")
+			photo, fileHeader, e := r.FormFile("file0")
 			if e != nil {
 				t.Error(e)
 				return
