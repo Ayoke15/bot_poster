@@ -20,6 +20,7 @@ type APIError struct {
 func (e *APIError) Error() string { return fmt.Sprintf("%s API failure (code %d)", e.Service, e.Code) }
 
 type API struct {
+	Web                                     *WebClient
 	HTTP                                    *http.Client
 	TelegramURL, VKURL, BotToken, VKVersion string
 }
@@ -92,6 +93,9 @@ func parseTelegramResponse(data []byte, result any) error {
 	return nil
 }
 func (a *API) VK(ctx context.Context, method, token string, values url.Values, result any) error {
+	if a.Web != nil {
+		return a.Web.call(ctx, method, values, result)
+	}
 	values.Set("access_token", token)
 	values.Set("v", a.VKVersion)
 	data, e := a.request(ctx, "vk", a.VKURL+"/"+method, bytes.NewBufferString(values.Encode()), "application/x-www-form-urlencoded")

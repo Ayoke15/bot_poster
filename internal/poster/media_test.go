@@ -336,7 +336,7 @@ func TestUploadURLValidation(t *testing.T) {
 	}
 }
 
-func TestCommunityPhotoUploadFallback(t *testing.T) {
+func TestCommunityPhotoUploadDoesNotPublishMessagesAttachment(t *testing.T) {
 	s, f := fixture(t, false)
 	seed(t, s)
 	media := photoServer(t, s, f)
@@ -346,18 +346,17 @@ func TestCommunityPhotoUploadFallback(t *testing.T) {
 	media.mu.Lock()
 	servers, saves := media.communityServers, media.communitySaves
 	media.mu.Unlock()
-	if servers != 1 || saves != 1 || f.posts != 1 || f.last.Get("attachments") != "photo-99_55" || f.last.Get("message") != "Community caption" {
-		t.Fatal("community photo was not attached to wall post")
+	if servers != 0 || saves != 0 || f.posts != 0 || count(t, s, "SELECT count(*) FROM poster_posts WHERE status='failed'") != 1 {
+		t.Fatal("unsupported wall upload must fail without a caption-only post")
 	}
 }
 
-func TestCommunityPhotoUploadFormats(t *testing.T) {
+func TestWallPhotoUploadFormats(t *testing.T) {
 	for _, format := range []string{"png", "jpeg"} {
 		t.Run(format, func(t *testing.T) {
 			s, f := fixture(t, false)
 			seed(t, s)
 			media := photoServer(t, s, f)
-			media.wallServerError = 27
 			if format == "jpeg" {
 				img, e := png.Decode(bytes.NewReader(media.data))
 				if e != nil {
