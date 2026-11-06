@@ -1,7 +1,8 @@
 """Diagnostic only: use the existing community key through curl, never log URLs/keys.
 
-Every attempt gets a fresh signed upload URL. Stop after the first accepted wall
-post; leave all created objects for the owner's manual inspection.
+Every attempt gets a fresh signed upload URL. Leave all created objects for the
+owner's manual inspection: wall.post accepting an attachment does not prove it
+appears on the wall. --large checks four high-resolution image variants.
 """
 
 import hashlib
@@ -70,7 +71,12 @@ def trusted(endpoint):
         raise ProbeError('untrusted_upload_endpoint')
 
 
-def cases():
+def cases(large=False):
+    if large:
+        for width in (1920, 2560):
+            for ext, mime in (('jpg', 'image/jpeg'), ('png', 'image/png')):
+                yield width, ext, 'photo', 'photo.' + ext, mime, '5.199', False
+        return
     # Test one variable at a time against the small image with its correct MIME.
     for width in (320, 1280):
         for ext, mime in (('jpg', 'image/jpeg'), ('png', 'image/png')):
@@ -89,6 +95,7 @@ def main():
     token = os.environ['VK_TEST_COMMUNITY_TOKEN']
     group = int(os.environ['VK_TEST_GROUP_ID'])
     fixtures = Path(sys.argv[1])
+    large = '--large' in sys.argv[2:]
     own = vk('groups.getById', token, '5.199')
     own = own.get('groups', []) if isinstance(own, dict) else own
     if group <= 0 or len(own) != 1 or own[0]['id'] != group:
@@ -100,7 +107,9 @@ def main():
         print('::notice title=VK wall upload route::' + str(error), flush=True)
 
     attempts = []
-    for number, (width, ext, field, filename, mime, version, http1) in enumerate(cases(), 1):
+    posted_links = []
+    can_read_wall = True
+    for number, (width, ext, field, filename, mime, version, http1) in enumerate(cases(large), 1):
         label = (f'{number}: {ext} {width}x{width * 3 // 4}, field={field}, '
                  f'filename={filename}, mime={mime or "curl-auto"}, v={version}, HTTP1={http1}')
         stage = 'getMessagesUploadServer'
@@ -123,8 +132,15 @@ def main():
             attachment = f'photo{item["owner_id"]}_{item["id"]}'
             if item.get('access_key'):
                 attachment += '_' + item['access_key']
+            sizes = item.get('sizes', [])
+            dimensions = [(s.get('width', 0), s.get('height', 0)) for s in sizes if isinstance(s, dict)]
+            # Log dimensions only; the saved image URLs and access keys are private.
+            dimensions = [(w, h) for w, h in dimensions if isinstance(w, int) and isinstance(h, int)]
+            saved_size = max(dimensions, key=lambda size: size[0] * size[1], default=(0, 0))
             marker = 'autoposter-ci-curl-formats-' + os.environ['GITHUB_RUN_ID']
-            # Same guid for every case: an uncertain response must not cause duplicates.
+            if large:
+                marker += f'-{width}-{ext}'
+            # A stable guid per intended post: don't retry an uncertain submission.
             guid = hashlib.sha256((marker + ':' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')).encode()).hexdigest()[:32]
             stage = 'wall.post'
             posted = vk('wall.post', token, version, owner_id=-group, from_group=1,
@@ -132,10 +148,22 @@ def main():
             post_id = posted.get('post_id', 0)
             if not isinstance(post_id, int) or post_id <= 0:
                 raise ProbeError('wall_post_missing_ID')
-            print(f'::notice title=VK photo format accepted::{label}; created https://vk.ru/wall-{group}_{post_id}; left for manual inspection', flush=True)
-            if attempts:
-                print('::notice title=VK photo preceding attempts::' + '%0A'.join(attempts), flush=True)
-            return
+            link = f'https://vk.ru/wall-{group}_{post_id}'
+            posted_links.append(link)
+            print(f'::notice title=VK photo post requires visual inspection::{label}; saved_image={saved_size[0]}x{saved_size[1]}; {link}; wall attachment visibility NOT verified', flush=True)
+            if can_read_wall:
+                try:
+                    existing = vk('wall.getById', token, version, posts=f'-{group}_{post_id}')
+                    existing = existing.get('items', []) if isinstance(existing, dict) else existing
+                    photos = [a for post in existing for a in post.get('attachments', []) if a.get('type') == 'photo']
+                    print(f'::notice title=VK wall attachment check::{link}; actual_photo_count={len(photos)}', flush=True)
+                except ProbeError as error:
+                    can_read_wall = False
+                    print('::notice title=VK wall attachment check::Cannot read wall with this key: ' + str(error), flush=True)
+            if not large:
+                if attempts:
+                    print('::notice title=VK photo preceding attempts::' + '%0A'.join(attempts), flush=True)
+                return
         except ProbeError as error:
             diagnostic = f'{label}; stage={stage}; {error}'
             attempts.append(diagnostic)
@@ -147,7 +175,11 @@ def main():
                 # another attachment or switch API versions after that point.
                 print('::notice title=VK photo preceding attempts::' + '%0A'.join(attempts), flush=True)
                 raise ProbeError('wall_post_failed_or_uncertain; stopped_after_first_publication_attempt') from None
-    print('::notice title=VK photo format attempts::' + '%0A'.join(attempts), flush=True)
+    if attempts:
+        print('::notice title=VK photo format attempts::' + '%0A'.join(attempts), flush=True)
+    if posted_links:
+        print('::notice title=VK photo manual review::Check actual attached photos at ' + ', '.join(posted_links), flush=True)
+        return
     raise ProbeError('no_format_accepted; no_wall_post_request_sent')
 
 

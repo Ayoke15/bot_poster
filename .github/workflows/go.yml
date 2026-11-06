@@ -110,7 +110,7 @@ jobs:
           VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
         run: |
           go run .github/scripts/photo_fixtures.go "$RUNNER_TEMP/vk-photo-formats"
-          python3 .github/scripts/vk_photo_probe.py "$RUNNER_TEMP/vk-photo-formats"
+          python3 .github/scripts/vk_photo_probe.py "$RUNNER_TEMP/vk-photo-formats" --large
       - name: Create text and photo posts in Telegram and VK
         shell: bash
         run: |

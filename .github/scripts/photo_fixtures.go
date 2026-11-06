@@ -18,7 +18,7 @@ func main() {
 	if err := os.MkdirAll(os.Args[1], 0700); err != nil {
 		panic(err)
 	}
-	for _, width := range []int{320, 1280} {
+	for _, width := range []int{320, 1280, 1920, 2560} {
 		height := width * 3 / 4
 		img := image.NewRGBA(image.Rect(0, 0, width, height))
 		for y := 0; y < height; y++ {
