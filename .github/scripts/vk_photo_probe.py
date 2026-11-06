@@ -99,6 +99,7 @@ def main():
     except ProbeError as error:
         print('::notice title=VK wall upload route::' + str(error), flush=True)
 
+    attempts = []
     for number, (width, ext, field, filename, mime, version, http1) in enumerate(cases(), 1):
         label = (f'{number}: {ext} {width}x{width * 3 // 4}, field={field}, '
                  f'filename={filename}, mime={mime or "curl-auto"}, v={version}, HTTP1={http1}')
@@ -110,9 +111,9 @@ def main():
             uploaded = request(endpoint, upload=(fixtures / f'photo-{width}.{ext}', field, filename, mime), http1=http1)
             photo = uploaded.get('photo')
             if not isinstance(photo, str) or not photo or photo == '[]':
-                state = 'empty_array' if photo == '[]' else 'missing_or_invalid'
+                state = 'empty_array' if photo == '[]' or photo == [] else 'missing_or_invalid'
                 server = uploaded.get('server')
-                raise ProbeError(f'HTTP=200 photo={state} server_valid={isinstance(server, int) and server > 0} hash_present={bool(uploaded.get("hash"))}')
+                raise ProbeError(f'HTTP=200 photo={state} photo_type={type(photo).__name__} photo_nonempty={bool(photo)} server_valid={isinstance(server, int) and server > 0} hash_present={bool(uploaded.get("hash"))}')
             stage = 'saveMessagesPhoto'
             saved = vk('photos.saveMessagesPhoto', token, version, photo=photo,
                        server=uploaded.get('server', 0), hash=uploaded.get('hash', ''))
@@ -132,13 +133,21 @@ def main():
             if not isinstance(post_id, int) or post_id <= 0:
                 raise ProbeError('wall_post_missing_ID')
             print(f'::notice title=VK photo format accepted::{label}; created https://vk.ru/wall-{group}_{post_id}; left for manual inspection', flush=True)
+            if attempts:
+                print('::notice title=VK photo preceding attempts::' + '%0A'.join(attempts), flush=True)
             return
         except ProbeError as error:
-            print(f'::notice title=VK photo format probe::{label}; stage={stage}; {error}', flush=True)
+            diagnostic = f'{label}; stage={stage}; {error}'
+            attempts.append(diagnostic)
+            # GitHub only retains ten notice annotations per step. Aggregate
+            # failures so the successful variant and its post URL are retained.
+            print(diagnostic, flush=True)
             if stage == 'wall.post':
                 # An uncertain wall.post can already have created a post; don't submit
                 # another attachment or switch API versions after that point.
+                print('::notice title=VK photo preceding attempts::' + '%0A'.join(attempts), flush=True)
                 raise ProbeError('wall_post_failed_or_uncertain; stopped_after_first_publication_attempt') from None
+    print('::notice title=VK photo format attempts::' + '%0A'.join(attempts), flush=True)
     raise ProbeError('no_format_accepted; no_wall_post_request_sent')
 
 
