@@ -9,7 +9,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/textproto"
 	"net/url"
 	"path"
 	"strings"
@@ -90,10 +89,8 @@ func multipartPhoto(field string, photo []byte, filename string, fields map[stri
 			return nil, "", e
 		}
 	}
-	headers := make(textproto.MIMEHeader)
-	headers.Set("Content-Disposition", fmt.Sprintf("form-data; name=%q; filename=%q", field, filename))
-	headers.Set("Content-Type", http.DetectContentType(photo))
-	part, e := w.CreatePart(headers)
+	// Match VK's Go SDK upload contract; the filename carries the image type.
+	part, e := w.CreateFormFile(field, filename)
 	if e != nil {
 		return nil, "", e
 	}
@@ -184,7 +181,7 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 	if !a.trustedUploadURL(server.URL) {
 		return "", &VerificationError{"VK returned an untrusted photo upload URL"}
 	}
-	body, contentType, e := multipartPhoto("file0", data, "file0"+path.Ext(filename), nil)
+	body, contentType, e := multipartPhoto("photo", data, "photo"+path.Ext(filename), nil)
 	if e != nil {
 		return "", &APIError{"vk_photo_upload", 0, false}
 	}
