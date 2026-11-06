@@ -181,12 +181,14 @@ func runLivePost(t *testing.T, withPhoto bool) {
 		}
 	}
 	var postID *int64
+	var lastCause string
 	for ctx.Err() == nil {
 		var state, cause string
 		e = store.Pool.QueryRow(ctx, "SELECT status,vk_post_id,coalesce(last_error,'') FROM poster_posts WHERE chat_id=$1 AND message_id=$2", channel, sent.ID).Scan(&state, &postID, &cause)
 		if e != nil {
-			t.Fatal("cannot read delivery status")
+			t.Fatalf("cannot read delivery status; last safe delivery error: %s", lastCause)
 		}
+		lastCause = cause
 		if state == "failed" || state == "cancelled" {
 			t.Fatalf("live VK delivery %s: %s", state, cause)
 		}
@@ -199,7 +201,7 @@ func runLivePost(t *testing.T, withPhoto bool) {
 		}
 	}
 	if postID == nil {
-		t.Fatal("timed out waiting for VK publication")
+		t.Fatalf("timed out waiting for VK publication; last safe delivery error: %s", lastCause)
 	}
 	if withPhoto && count(t, s, "SELECT count(*) FROM poster_posts WHERE chat_id=$1 AND message_id=$2 AND photo_file_id<>'' AND uploaded_photo_file_id=photo_file_id AND vk_attachment<>''", channel, sent.ID) != 1 {
 		t.Fatal("photo attachment was not saved before VK publication")

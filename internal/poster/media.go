@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -91,7 +90,7 @@ func multipartPhoto(photo []byte, filename string, fields map[string]string) (*b
 		}
 	}
 	headers := make(textproto.MIMEHeader)
-	headers.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "photo", "filename": filename}))
+	headers.Set("Content-Disposition", fmt.Sprintf("form-data; name=%q; filename=%q", "photo", filename))
 	headers.Set("Content-Type", http.DetectContentType(photo))
 	part, e := w.CreatePart(headers)
 	if e != nil {
@@ -156,6 +155,20 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 	uploadAPI := *a
 	client := *a.HTTP
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	// Use the same HTTP/1.1 multipart transport as conventional VK upload SDKs.
+	// Clone the configured transport so proxy settings and TLS trust are retained.
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	if base, ok := transport.(*http.Transport); ok {
+		cloned := base.Clone()
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		cloned.Protocols = protocols
+		client.Transport = cloned
+		defer cloned.CloseIdleConnections()
+	}
 	uploadAPI.HTTP = &client
 	raw, e := uploadAPI.request(ctx, "vk_photo_upload", server.URL, body, contentType)
 	if e != nil {
@@ -168,7 +181,7 @@ func (a *API) UploadWallPhoto(ctx context.Context, token string, group int64, fi
 		Hash   string `json:"hash"`
 	}
 	if json.Unmarshal(raw, &uploaded) != nil || uploaded.Photo == "" || uploaded.Photo == "[]" || uploaded.Server <= 0 || uploaded.Hash == "" {
-		return "", &APIError{"vk_photo_upload", 0, true}
+		return "", fmt.Errorf("VK upload response incomplete (photo_empty=%t server_valid=%t hash_present=%t): %w", uploaded.Photo == "" || uploaded.Photo == "[]", uploaded.Server > 0, uploaded.Hash != "", &APIError{"vk_photo_upload", 0, true})
 	}
 	var saved []struct {
 		ID        int64  `json:"id"`
