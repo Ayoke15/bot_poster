@@ -1,0 +1,114 @@
+name: Go
+run-name: Go / ${{ github.event_name }} / ${{ github.head_ref || github.ref_name }}
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: poster_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d poster_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - name: Explain live test eligibility
+        env:
+          LIVE_ENABLED: ${{ vars.RUN_LIVE_INTEGRATION == 'true' }}
+          IS_DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
+          IS_MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+          IS_TRUSTED_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          if [ "$LIVE_ENABLED" != true ]; then
+            reason='Skipped: set repository Variable RUN_LIVE_INTEGRATION=true in Settings > Secrets and variables > Actions > Variables. A Secret or Environment variable with that name does not enable this job.'
+          elif [ "$IS_DEPENDABOT" = true ]; then
+            reason='Skipped: Dependabot runs do not receive live test credentials.'
+          elif [ "$IS_MANUAL" != true ] && [ "$IS_TRUSTED_PR" != true ]; then
+            reason='Skipped: live tests run on same-repository pull_request events or workflow_dispatch. A push run intentionally skips this job; open the pull_request run.'
+          else
+            reason='Enabled: Live Telegram to VK will run after the test job passes. If test fails, fix it first; the live job depends on its success.'
+          fi
+          echo "$reason"
+          echo "### Live Telegram to VK" >> "$GITHUB_STEP_SUMMARY"
+          echo "$reason" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - run: go mod verify
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/poster_test
+      - run: go build ./cmd/bot
+
+  live-integration:
+    name: Live Telegram to VK
+    needs: test
+    if: >-
+      vars.RUN_LIVE_INTEGRATION == 'true' &&
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    concurrency:
+      group: live-telegram-vk-test-bot
+      cancel-in-progress: false
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: poster_live_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d poster_live_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - name: Create Telegram and VK posts for manual inspection
+        shell: bash
+        run: |
+          go test -race -tags=live -run '^TestLiveTelegramToVK$' -count=1 -timeout=5m -v ./internal/poster 2>&1 | tee "$RUNNER_TEMP/live-test.log"
+        env:
+          RUN_LIVE_INTEGRATION: 'true'
+          TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/poster_live_test
+          TG_TEST_BOT_TOKEN: ${{ secrets.TG_TEST_BOT_TOKEN }}
+          VK_TEST_USER_TOKEN: ${{ secrets.VK_TEST_USER_TOKEN || secrets.VK_TEST_COMMUNITY_TOKEN }}
+          TG_TEST_CHANNEL_ID: ${{ vars.TG_TEST_CHANNEL_ID }}
+          TG_TEST_OWNER_ID: ${{ secrets.TG_TEST_OWNER_ID }}
+          VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
+      - name: Annotate live test failure
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY_ANNOTATE'
+          import os, pathlib, re
+          for filename in ('live-test.log',):
+              log = pathlib.Path(os.environ['RUNNER_TEMP']) / filename
+              if not log.exists():
+                  continue
+              for line in log.read_text(errors='replace').splitlines():
+                  match = re.match(r'\s*([A-Za-z0-9_]+_test\.go):(\d+):\s*(.*)', line)
+                  if match:
+                      message = match[3].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f'::error file=internal/poster/{match[1]},line={match[2]},title=Live integration failure::{message}')
+          PY_ANNOTATE
