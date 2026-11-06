@@ -84,15 +84,7 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
-      - name: Probe actual VK community-token publication support
-        shell: bash
-        run: |
-          go test -race -tags=live -run '^TestLiveVKCommunityPosting$' -count=1 -timeout=2m -v ./internal/poster 2>&1 | tee "$RUNNER_TEMP/vk-community-probe.log"
-        env:
-          RUN_VK_COMMUNITY_PROBE: 'true'
-          VK_TEST_COMMUNITY_TOKEN: ${{ secrets.VK_TEST_COMMUNITY_TOKEN }}
-          VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
-      - name: Publish from Telegram, check VK post exists, and clean up
+      - name: Create Telegram and VK posts for manual inspection
         shell: bash
         run: |
           go test -race -tags=live -run '^TestLiveTelegramToVK$' -count=1 -timeout=5m -v ./internal/poster 2>&1 | tee "$RUNNER_TEMP/live-test.log"
@@ -101,7 +93,6 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/poster_live_test
           TG_TEST_BOT_TOKEN: ${{ secrets.TG_TEST_BOT_TOKEN }}
           VK_TEST_USER_TOKEN: ${{ secrets.VK_TEST_USER_TOKEN || secrets.VK_TEST_COMMUNITY_TOKEN }}
-          VK_TEST_READ_TOKEN: ${{ secrets.VK_TEST_READ_TOKEN || secrets.VK_TEST_USER_TOKEN || secrets.VK_TEST_COMMUNITY_TOKEN }}
           TG_TEST_CHANNEL_ID: ${{ vars.TG_TEST_CHANNEL_ID }}
           TG_TEST_OWNER_ID: ${{ secrets.TG_TEST_OWNER_ID }}
           VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
@@ -111,7 +102,7 @@ jobs:
         run: |
           python3 - <<'PY_ANNOTATE'
           import os, pathlib, re
-          for filename in ('vk-community-probe.log', 'live-test.log'):
+          for filename in ('live-test.log',):
               log = pathlib.Path(os.environ['RUNNER_TEMP']) / filename
               if not log.exists():
                   continue

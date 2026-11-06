@@ -118,16 +118,47 @@ func (a *API) VerifyGroup(ctx context.Context, token string, group int64) error 
 	var permissions int64
 	if e := a.VK(ctx, "account.getAppPermissions", token, url.Values{}, &permissions); e != nil {
 		if apiError, ok := e.(*APIError); ok && apiError.Code == 27 {
-			return fmt.Errorf("account.getAppPermissions: %w; нужен действующий пользовательский VK API ключ с правом wall от редактора или администратора группы; ключ из настроек сообщества не подходит", e)
+			return a.verifyCommunityGroup(ctx, token, group)
 		}
 		return e
 	}
 	if permissions&8192 == 0 {
 		return &VerificationError{"У пользовательского ключа нет права wall. Авторизуйте приложение с доступом к стене."}
 	}
+	return a.verifyGroupIdentity(ctx, token, group, false)
+}
+
+func (a *API) verifyCommunityGroup(ctx context.Context, token string, group int64) error {
+	var rights struct {
+		Permissions []struct {
+			Name    string `json:"name"`
+			Setting int    `json:"setting"`
+		} `json:"permissions"`
+	}
+	if e := a.VK(ctx, "groups.getTokenPermissions", token, url.Values{}, &rights); e != nil {
+		return fmt.Errorf("groups.getTokenPermissions: %w", e)
+	}
+	wall := false
+	for _, p := range rights.Permissions {
+		if p.Name == "wall" && p.Setting > 0 {
+			wall = true
+		}
+	}
+	if !wall {
+		return &VerificationError{"У ключа сообщества нет права wall. Проверьте разрешения ключа."}
+	}
+	return a.verifyGroupIdentity(ctx, token, group, true)
+}
+
+func (a *API) verifyGroupIdentity(ctx context.Context, token string, group int64, community bool) error {
 	var raw json.RawMessage
-	// Check the selected group using this user token and require an administrative role.
-	if e := a.VK(ctx, "groups.getById", token, url.Values{"group_ids": {intString(group)}, "fields": {"can_post,wall"}}, &raw); e != nil {
+	// A community token must identify its own group; user tokens select a group
+	// and must additionally prove an editor/administrator role.
+	params := url.Values{"fields": {"can_post,wall"}}
+	if !community {
+		params.Set("group_ids", intString(group))
+	}
+	if e := a.VK(ctx, "groups.getById", token, params, &raw); e != nil {
 		return e
 	}
 	type groupInfo struct {
@@ -155,16 +186,16 @@ func (a *API) VerifyGroup(ctx context.Context, token string, group int64) error 
 	if g.Deactivated != "" {
 		return &VerificationError{"Сообщество VK заблокировано или удалено. Публикация недоступна."}
 	}
-	if g.IsAdmin == nil || *g.IsAdmin != 1 || g.AdminLevel == nil || *g.AdminLevel < 2 {
+	if !community && (g.IsAdmin == nil || *g.IsAdmin != 1 || g.AdminLevel == nil || *g.AdminLevel < 2) {
 		return &VerificationError{"Владелец пользовательского ключа должен быть редактором или администратором выбранного сообщества, чтобы публиковать от его имени."}
 	}
 	if g.Wall != nil && *g.Wall == 0 {
 		return &VerificationError{"Стена сообщества отключена. Включите её в настройках VK и пришлите токен снова."}
 	}
-	if g.CanPost != nil && *g.CanPost == 0 {
+	if !community && g.CanPost != nil && *g.CanPost == 0 {
 		return &VerificationError{"VK сообщает, что этот токен не может публиковать на стене сообщества. Проверьте права ключа и настройки стены."}
 	}
-	if g.CanPost == nil || *g.CanPost != 1 || g.Wall == nil || *g.Wall < 1 || *g.Wall > 3 {
+	if !community && (g.CanPost == nil || *g.CanPost != 1 || g.Wall == nil || *g.Wall < 1 || *g.Wall > 3) {
 		return &VerificationError{"VK не подтвердил возможность публикации: не получены корректные can_post и wall. Проверьте настройки сообщества и повторите подключение."}
 	}
 	return nil

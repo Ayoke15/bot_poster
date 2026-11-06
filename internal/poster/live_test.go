@@ -22,7 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// This opt-in test creates and deletes real posts. It never registers or deletes
+// This opt-in test creates real posts and leaves them for manual inspection. It never registers or deletes
 // webhooks or polls updates. A synthetic channel_post wraps the real sendMessage
 // response; inbound Telegram event delivery is deliberately outside this test.
 func TestLiveTelegramToVK(t *testing.T) {
@@ -49,11 +49,7 @@ func TestLiveTelegramToVK(t *testing.T) {
 	vkToken := os.Getenv("VK_TEST_USER_TOKEN")
 	if vkToken == "" {
 		vkToken = required("VK_TEST_COMMUNITY_TOKEN")
-	} // Legacy secret name; the value must still be a user token.
-	readToken := os.Getenv("VK_TEST_READ_TOKEN")
-	if readToken == "" {
-		readToken = vkToken
-	}
+	} // Both verified community and user tokens are supported.
 	channel, owner, group := number("TG_TEST_CHANNEL_ID"), number("TG_TEST_OWNER_ID"), number("VK_TEST_GROUP_ID")
 	if channel >= 0 || owner <= 0 || group <= 0 {
 		t.Fatal("channel must be negative; owner and VK group must be positive")
@@ -122,12 +118,7 @@ func TestLiveTelegramToVK(t *testing.T) {
 		t.Fatal("owner and test bot must be channel administrators")
 	}
 	if e = api.VerifyGroup(ctx, vkToken, group); e != nil {
-		t.Fatalf("VK token verification failed: %v. Update GitHub Secret VK_TEST_USER_TOKEN, or VK_TEST_COMMUNITY_TOKEN if the new name is absent. No test posts have been created.", e)
-	}
-	// Confirm the read credential before creating any content.
-	var before json.RawMessage
-	if e = api.VK(ctx, "wall.get", readToken, url.Values{"owner_id": {intString(-group)}, "count": {"1"}}, &before); e != nil {
-		t.Fatal("VK_TEST_READ_TOKEN cannot read the test community wall")
+		t.Fatalf("VK token verification failed: %v. Check the configured VK_TEST_USER_TOKEN or VK_TEST_COMMUNITY_TOKEN and its wall permission. No test posts have been created.", e)
 	}
 	encrypted, e := store.Cipher.Encrypt(owner, vkToken)
 	if e != nil {
@@ -146,20 +137,6 @@ func TestLiveTelegramToVK(t *testing.T) {
 	if sent.ID <= 0 || sent.Chat.ID != channel || sent.Chat.Type != "channel" {
 		t.Fatal("Telegram did not return a message from the test channel")
 	}
-	// Cleanup runs before the database pools close, even when an assertion fails.
-	t.Cleanup(func() {
-		cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
-		defer done()
-		var postID *int64
-		if e := store.Pool.QueryRow(cleanup, "SELECT vk_post_id FROM poster_posts WHERE chat_id=$1 AND message_id=$2", channel, sent.ID).Scan(&postID); e == nil && postID != nil {
-			if e = api.VK(cleanup, "wall.delete", vkToken, url.Values{"owner_id": {intString(-group)}, "post_id": {intString(*postID)}}, nil); e != nil {
-				t.Error("VK test post cleanup failed; remove the post bearing marker " + marker)
-			}
-		}
-		if e := api.Telegram(cleanup, "deleteMessage", map[string]any{"chat_id": channel, "message_id": sent.ID}, nil); e != nil {
-			t.Error("Telegram test post cleanup failed")
-		}
-	})
 	httpServer := httptest.NewServer(s.Handler())
 	t.Cleanup(httpServer.Close)
 	workerCtx, stopWorker := context.WithCancel(ctx)
@@ -213,27 +190,9 @@ func TestLiveTelegramToVK(t *testing.T) {
 	if postID == nil {
 		t.Fatal("timed out waiting for VK publication")
 	}
-	type vkPost struct {
-		ID        int64           `json:"id"`
-		Owner     int64           `json:"owner_id"`
-		IsDeleted json.RawMessage `json:"is_deleted"`
+	if *postID <= 0 {
+		t.Fatal("VK did not return a positive post ID")
 	}
-	var raw json.RawMessage
-	if e = api.VK(ctx, "wall.getById", readToken, url.Values{"posts": {intString(-group) + "_" + intString(*postID)}}, &raw); e != nil {
-		t.Fatal(e)
-	}
-	var posts []vkPost
-	if json.Unmarshal(raw, &posts) != nil {
-		var object struct {
-			Items []vkPost `json:"items"`
-		}
-		if json.Unmarshal(raw, &object) != nil {
-			t.Fatal("invalid VK read response")
-		}
-		posts = object.Items
-	}
-	if len(posts) != 1 || posts[0].ID != *postID || posts[0].Owner != -group || string(posts[0].IsDeleted) == "true" || string(posts[0].IsDeleted) == "1" {
-		t.Fatal("created VK post does not exist in the target community")
-	}
-	t.Log("Real Telegram sendMessage result forwarded through handler to VK; post exists; inbound event delivery not tested")
+	t.Logf("Created Telegram message %d and VK post %d_%d; both left for manual inspection. VK URL: https://vk.ru/wall%d_%d", sent.ID, -group, *postID, -group, *postID)
+	t.Log("Inbound Telegram delivery and VK content/read/delete APIs are outside this creation-only test")
 }

@@ -903,12 +903,12 @@ func TestVKConnectionWarnings(t *testing.T) {
 	}
 }
 
-func TestCommunityTokenRejectedBeforeGroupLookup(t *testing.T) {
+func TestInvalidCommunityTokenRejectedBeforeGroupLookup(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if !strings.HasSuffix(r.URL.Path, "account.getAppPermissions") {
-			t.Error("group lookup performed without user authorization")
+		if !strings.HasSuffix(r.URL.Path, "account.getAppPermissions") && !strings.HasSuffix(r.URL.Path, "groups.getTokenPermissions") {
+			t.Error("group lookup performed without token authorization")
 		}
 		io.WriteString(w, `{"error":{"error_code":27,"error_msg":"secret upstream details"}}`)
 	}))
@@ -916,14 +916,14 @@ func TestCommunityTokenRejectedBeforeGroupLookup(t *testing.T) {
 	api := NewAPI(Config{})
 	api.VKURL = server.URL
 	err := api.VerifyGroup(context.Background(), "private-community-key", 99)
-	if err == nil || calls != 1 {
-		t.Fatal("non-user key accepted")
+	if err == nil || calls != 2 {
+		t.Fatal("invalid key accepted")
 	}
 	var upstream *APIError
 	if !errors.As(err, &upstream) || upstream.Code != 27 {
 		t.Fatal("VK error classification lost")
 	}
-	if !strings.Contains(err.Error(), "account.getAppPermissions") || !strings.Contains(err.Error(), "пользовательский VK API ключ") {
+	if !strings.Contains(err.Error(), "groups.getTokenPermissions") {
 		t.Fatal("missing actionable authorization diagnosis")
 	}
 	reply := tokenVerificationMessage(err)
@@ -932,5 +932,45 @@ func TestCommunityTokenRejectedBeforeGroupLookup(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private-community-key") {
 		t.Fatal("sensitive VK details leaked")
+	}
+}
+
+func TestVerifyCommunityTokenForGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name, rights, group string
+		denied              bool
+	}{
+		{"own community", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"wall":1}]}`, false},
+		{"legacy own community", `{"permissions":[{"name":"wall","setting":1}]}`, `[{"id":99}]`, false},
+		{"wrong community", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":100,"wall":1}]}`, true},
+		{"wall not allowed", `{"permissions":[{"name":"wall","setting":0}]}`, `{"groups":[{"id":99}]}`, true},
+		{"disabled wall", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"wall":0}]}`, true},
+		{"blocked group", `{"permissions":[{"name":"wall","setting":1}]}`, `{"groups":[{"id":99,"deactivated":"banned"}]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				switch r.URL.Path {
+				case "/account.getAppPermissions":
+					io.WriteString(w, `{"error":{"error_code":27}}`)
+				case "/groups.getTokenPermissions":
+					io.WriteString(w, `{"response":`+tc.rights+`}`)
+				case "/groups.getById":
+					if r.Form.Has("group_ids") {
+						t.Error("community token identity must not come from arbitrary group lookup")
+					}
+					io.WriteString(w, `{"response":`+tc.group+`}`)
+				default:
+					t.Error("verification attempted to publish or used unexpected method")
+					w.WriteHeader(400)
+				}
+			}))
+			defer server.Close()
+			api := NewAPI(Config{})
+			api.VKURL = server.URL
+			if e := api.VerifyGroup(context.Background(), "community-secret", 99); (e != nil) != tc.denied {
+				t.Fatalf("unexpected verification result: %v", e)
+			}
+		})
 	}
 }
