@@ -142,6 +142,15 @@ jobs:
               own = vk('groups.getById')
               own = own.get('groups', []) if isinstance(own, dict) else own
               if group <= 0 or len(own) != 1 or own[0]['id'] != group: stop('community identity mismatch')
+              configured = request('https://api.vk.com/method/groups.getSettings', dict(access_token=token, v='5.199', group_id=group))
+              if 'response' in configured:
+                  settings = configured['response']
+                  def setting(name):
+                      value = settings.get(name)
+                      return str(int(value)) if isinstance(value, (int, bool)) else 'not-returned'
+                  print('::notice title=Curl VK community settings::wall=' + setting('wall') + ', photos=' + setting('photos') + ', messages=' + setting('messages'))
+              else:
+                  print('::notice title=Curl VK community settings::settings read unavailable; API code ' + str(configured.get('error', {}).get('error_code', 0)))
               def chunk(kind, data):
                   return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data) & 0xffffffff)
               rows = b''.join(b'\0' + bytes(c for x in range(640) for c in (x*255//639, y*255//479, (x*31+y*17)%256)) for y in range(480))
