@@ -14,7 +14,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -145,12 +144,6 @@ func runLivePost(t *testing.T, withPhoto bool) {
 	}
 	if withPhoto && (largestPhoto(sent.Photo) == "" || sent.Caption != marker) {
 		t.Fatal("Telegram did not return a photo and caption")
-	}
-	if withPhoto && os.Getenv("RUNNER_TEMP") != "" {
-		source, _ := json.Marshal(map[string]string{"file_id": largestPhoto(sent.Photo)})
-		if e := os.WriteFile(filepath.Join(os.Getenv("RUNNER_TEMP"), "photo-source.json"), source, 0600); e != nil {
-			t.Fatal("cannot save diagnostic photo reference")
-		}
 	}
 	if sent.ID <= 0 || sent.Chat.ID != channel || sent.Chat.Type != "channel" {
 		t.Fatal("Telegram did not return a message from the test channel")

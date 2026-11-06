@@ -102,6 +102,67 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
+      - name: Publish VK photo with curl control
+        shell: bash
+        env:
+          VK_TEST_COMMUNITY_TOKEN: ${{ secrets.VK_TEST_COMMUNITY_TOKEN }}
+          VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
+        run: |
+          python3 - <<'PY_CURL'
+          import hashlib, json, os, pathlib, struct, subprocess, urllib.parse, zlib
+          def stop(message):
+              print('::error title=Curl VK photo smoke::' + message)
+              raise SystemExit(1)
+          def quote(value):
+              return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r') + '"'
+          def request(endpoint, fields=None, photo=None):
+              config = ['url = ' + quote(endpoint), 'request = "POST"']
+              for key, value in (fields or {}).items():
+                  config.append('data-urlencode = ' + quote(key + '=' + str(value)))
+              if photo:
+                  config.append('form = ' + quote('photo=@' + str(photo) + ';type=image/png;filename=photo.png'))
+              result = subprocess.run(['curl', '--silent', '--show-error', '--max-time', '30', '--config', '-', '--write-out', '\n%{http_code}'], input=('\n'.join(config) + '\n').encode(), capture_output=True)
+              if result.returncode: stop('curl transport exit code ' + str(result.returncode))
+              body, _, status = result.stdout.rpartition(b'\n')
+              if status != b'200': stop('curl HTTP ' + status.decode(errors='replace'))
+              return json.loads(body)
+          try:
+              token = os.environ['VK_TEST_COMMUNITY_TOKEN']
+              group = int(os.environ['VK_TEST_GROUP_ID'])
+              def vk(method, **fields):
+                  payload = request('https://api.vk.com/method/' + method, dict(access_token=token, v='5.199', **fields))
+                  if 'error' in payload: stop(method + ': VK API code ' + str(payload['error'].get('error_code', 0)))
+                  return payload['response']
+              own = vk('groups.getById')
+              own = own.get('groups', []) if isinstance(own, dict) else own
+              if group <= 0 or len(own) != 1 or own[0]['id'] != group: stop('community identity mismatch')
+              def chunk(kind, data):
+                  return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data) & 0xffffffff)
+              rows = b''.join(b'\0' + bytes(c for x in range(640) for c in (x*255//639, y*255//479, (x*31+y*17)%256)) for y in range(480))
+              image = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!IIBBBBB', 640, 480, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b'')
+              path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'vk-curl-photo.png'
+              path.write_bytes(image)
+              endpoint = vk('photos.getMessagesUploadServer')['upload_url']
+              parsed = urllib.parse.urlparse(endpoint)
+              hosts = ('vk.com', 'vk.ru', 'vkuserphoto.ru', 'vkuserphoto.com', 'userapi.com')
+              if parsed.scheme != 'https' or parsed.username or not any(parsed.hostname == h or (parsed.hostname or '').endswith('.' + h) for h in hosts): stop('untrusted upload endpoint')
+              uploaded = request(endpoint, photo=path)
+              if not uploaded.get('photo') or uploaded['photo'] == '[]': stop('curl upload returned no accepted photo')
+              saved = vk('photos.saveMessagesPhoto', photo=uploaded['photo'], server=uploaded.get('server', 0), hash=uploaded.get('hash', ''))
+              if len(saved) != 1 or saved[0].get('id', 0) <= 0 or not saved[0].get('owner_id'): stop('photo save returned no ID')
+              photo = saved[0]
+              attachment = 'photo' + str(photo['owner_id']) + '_' + str(photo['id'])
+              if photo.get('access_key'): attachment += '_' + photo['access_key']
+              marker = 'autoposter-ci-curl-' + os.environ['GITHUB_RUN_ID']
+              guid = hashlib.sha256((marker + ':' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')).encode()).hexdigest()[:32]
+              posted = vk('wall.post', owner_id=-group, from_group=1, attachments=attachment, message=marker, guid=guid)
+              if posted.get('post_id', 0) <= 0: stop('wall.post returned no ID')
+              print('::notice title=Curl VK photo smoke::Created https://vk.ru/wall-' + str(group) + '_' + str(posted['post_id']) + '; post left for manual inspection')
+          except SystemExit:
+              raise
+          except Exception as e:
+              stop('control failed: ' + type(e).__name__)
+          PY_CURL
       - name: Create text and photo posts in Telegram and VK
         shell: bash
         run: |
@@ -114,60 +175,6 @@ jobs:
           TG_TEST_CHANNEL_ID: ${{ vars.TG_TEST_CHANNEL_ID }}
           TG_TEST_OWNER_ID: ${{ secrets.TG_TEST_OWNER_ID }}
           VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
-      - name: Control VK upload with requests
-        if: failure()
-        shell: bash
-        env:
-          TG_TEST_BOT_TOKEN: ${{ secrets.TG_TEST_BOT_TOKEN }}
-          VK_TEST_COMMUNITY_TOKEN: ${{ secrets.VK_TEST_COMMUNITY_TOKEN }}
-          VK_TEST_GROUP_ID: ${{ vars.VK_TEST_GROUP_ID }}
-        run: |
-          test -f "$RUNNER_TEMP/photo-source.json" || exit 0
-          python3 -m pip install --quiet --disable-pip-version-check requests==2.32.5
-          python3 - <<'PY_CONTROL'
-          import json, os, pathlib, urllib.parse
-          import requests
-          def stop(stage):
-              print('::error title=VK SDK control::' + stage)
-              raise SystemExit(1)
-          def trusted(endpoint):
-              p = urllib.parse.urlparse(endpoint)
-              return p.scheme == 'https' and not p.username and any(p.hostname == h or (p.hostname or '').endswith('.' + h) for h in ('vk.com', 'vk.ru', 'vkuserphoto.ru', 'vkuserphoto.com', 'userapi.com'))
-          try:
-              session = requests.Session()
-              token = os.environ['VK_TEST_COMMUNITY_TOKEN']
-              bot = os.environ['TG_TEST_BOT_TOKEN']
-              group = int(os.environ['VK_TEST_GROUP_ID'])
-              def vk(method, **params):
-                  r = session.post('https://api.vk.com/method/' + method, data=dict(access_token=token, v='5.199', **params), timeout=20)
-                  if r.status_code != 200: stop(method + ': HTTP ' + str(r.status_code))
-                  payload = r.json()
-                  if 'error' in payload: stop(method + ': API code ' + str(payload['error'].get('error_code', 0)))
-                  return payload['response']
-              own = vk('groups.getById')
-              own = own.get('groups', []) if isinstance(own, dict) else own
-              if len(own) != 1 or own[0]['id'] != group: stop('community identity mismatch')
-              source = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'photo-source.json').read_text())
-              r = session.post('https://api.telegram.org/bot' + bot + '/getFile', json=source, timeout=20)
-              payload = r.json()
-              if not payload.get('ok'): stop('Telegram getFile failed')
-              path = payload['result']['file_path']
-              if '..' in path or path.startswith('/') or '?' in path: stop('invalid Telegram file path')
-              r = session.get('https://api.telegram.org/file/bot' + bot + '/' + path, timeout=20)
-              if r.status_code != 200 or not r.content or len(r.content) > 20*1024*1024: stop('Telegram photo download failed')
-              image = r.content
-              endpoint = vk('photos.getMessagesUploadServer')['upload_url']
-              if not trusted(endpoint): stop('untrusted upload endpoint')
-              r = session.post(endpoint, files={'photo': ('photo.jpeg', image)}, timeout=30, allow_redirects=False)
-              if r.status_code != 200: stop('requests multipart HTTP ' + str(r.status_code) + '; photo bytes=' + str(len(image)))
-              uploaded = r.json()
-              if not uploaded.get('photo') or uploaded['photo'] == '[]': stop('requests upload returned no accepted photo; photo bytes=' + str(len(image)))
-              print('::notice title=VK SDK control::requests accepted the real Telegram photo; no wall post created by control')
-          except SystemExit:
-              raise
-          except Exception as e:
-              stop('control request failed: ' + type(e).__name__)
-          PY_CONTROL
       - name: Annotate live test failure
         if: failure()
         shell: bash
