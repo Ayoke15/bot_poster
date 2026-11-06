@@ -182,13 +182,13 @@ func runLivePost(t *testing.T, withPhoto bool) {
 	}
 	var postID *int64
 	for ctx.Err() == nil {
-		var state string
-		e = store.Pool.QueryRow(ctx, "SELECT status,vk_post_id FROM poster_posts WHERE chat_id=$1 AND message_id=$2", channel, sent.ID).Scan(&state, &postID)
+		var state, cause string
+		e = store.Pool.QueryRow(ctx, "SELECT status,vk_post_id,coalesce(last_error,'') FROM poster_posts WHERE chat_id=$1 AND message_id=$2", channel, sent.ID).Scan(&state, &postID, &cause)
 		if e != nil {
 			t.Fatal("cannot read delivery status")
 		}
 		if state == "failed" || state == "cancelled" {
-			t.Fatal("live VK delivery failed; inspect test community permissions and limits")
+			t.Fatalf("live VK delivery %s: %s", state, cause)
 		}
 		if state == "done" && postID != nil {
 			break
