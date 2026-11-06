@@ -133,6 +133,12 @@ jobs:
                   payload = request('https://api.vk.com/method/' + method, dict(access_token=token, v='5.199', **fields))
                   if 'error' in payload: stop(method + ': VK API code ' + str(payload['error'].get('error_code', 0)))
                   return payload['response']
+              rights = vk('groups.getTokenPermissions')
+              settings = {p.get('name'): p.get('setting') for p in rights.get('permissions', [])}
+              def flag(name):
+                  value = settings.get(name)
+                  return str(int(value)) if isinstance(value, (int, bool)) else 'not-returned'
+              print('::notice title=Curl VK token scopes::wall=' + flag('wall') + ', photos=' + flag('photos') + ', messages=' + flag('messages'))
               own = vk('groups.getById')
               own = own.get('groups', []) if isinstance(own, dict) else own
               if group <= 0 or len(own) != 1 or own[0]['id'] != group: stop('community identity mismatch')
